@@ -1,0 +1,8 @@
+# author: mrbacco04@gmail.com
+# date: 2026-07-12
+# file: .gitignore
+
+__pycache__/
+*.pyc
+.venv/
+.streamlit/
