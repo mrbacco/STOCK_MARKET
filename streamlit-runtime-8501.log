@@ -3,3 +3,88 @@
 
   URL: http://127.0.0.1:8501
 
+[BAC_LOG] 2026-07-16 12:12:27 | Input tickers=['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA'], period=1y, interval=1d, realtime_mode=False, forecast_points=30
+[BAC_LOG] 2026-07-16 12:12:33 | Valid tickers with price data=['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA']
+[BAC_LOG] 2026-07-16 12:12:33 | Top movers (30-session)=[('META', np.float64(13.567955608867239)), ('AAPL', np.float64(6.917829196010109)), ('GOOGL', np.float64(-1.389173528440562))]
+[BAC_LOG] 2026-07-16 12:12:33 | Charting ticker=META, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:12:34 | Charting ticker=AAPL, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:12:34 | Charting ticker=GOOGL, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:12:35 | Fetched news for AAPL: rows=20
+[BAC_LOG] 2026-07-16 12:12:36 | Fetched news for MSFT: rows=20
+[BAC_LOG] 2026-07-16 12:12:37 | Fetched news for NVDA: rows=20
+[BAC_LOG] 2026-07-16 12:12:37 | Fetched news for GOOGL: rows=20
+[BAC_LOG] 2026-07-16 12:12:38 | Fetched news for AMZN: rows=20
+[BAC_LOG] 2026-07-16 12:12:39 | Fetched news for META: rows=20
+[BAC_LOG] 2026-07-16 12:12:39 | Fetched news for TSLA: rows=20
+[BAC_LOG] 2026-07-16 12:12:39 | Total combined news rows=140
+[BAC_LOG] 2026-07-16 12:13:02 | Input tickers=['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA'], period=1y, interval=1d, realtime_mode=False, forecast_points=30
+[BAC_LOG] 2026-07-16 12:13:02 | Valid tickers with price data=['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA']
+[BAC_LOG] 2026-07-16 12:13:02 | Top movers (30-session)=[('META', np.float64(13.567955608867239)), ('AAPL', np.float64(6.917829196010109)), ('GOOGL', np.float64(-1.389173528440562))]
+[BAC_LOG] 2026-07-16 12:13:02 | Charting ticker=META, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:13:02 | Charting ticker=AAPL, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:13:02 | Charting ticker=GOOGL, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for AAPL: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for MSFT: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for NVDA: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for GOOGL: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for AMZN: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for META: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Fetched news for TSLA: rows=20
+[BAC_LOG] 2026-07-16 12:13:02 | Total combined news rows=140
+[BAC_LOG] 2026-07-16 12:23:31 | Ticker source=Auto-detect top gainers, input tickers=['LCID', 'CHRN', 'AEHR', 'MAAS', 'PYPL', 'MANE', 'MNSO', 'ERAS', 'RH', 'MESO'], period=1y, interval=1d, realtime_mode=False, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Valid tickers with price data=['LCID', 'CHRN', 'AEHR', 'MAAS', 'PYPL', 'MANE', 'MNSO', 'ERAS', 'RH', 'MESO']
+[BAC_LOG] 2026-07-16 12:23:35 | Detected top performers=[('LCID', 28.7879), ('CHRN', 28.7701), ('AEHR', 21.9136), ('MAAS', 17.4344), ('PYPL', 17.205), ('MANE', 12.281), ('MNSO', 9.4536), ('ERAS', 9.02564), ('RH', 9.00028), ('MESO', 8.96057)]
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=LCID, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=CHRN, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=AEHR, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=MAAS, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=PYPL, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=MANE, close_points=111, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=MNSO, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=ERAS, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=RH, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:35 | Charting ticker=MESO, close_points=251, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:38 | Fetched news for LCID: rows=20
+[BAC_LOG] 2026-07-16 12:23:39 | Fetched news for CHRN: rows=20
+[BAC_LOG] 2026-07-16 12:23:41 | Fetched news for AEHR: rows=20
+[BAC_LOG] 2026-07-16 12:23:42 | Fetched news for MAAS: rows=20
+[BAC_LOG] 2026-07-16 12:23:44 | Fetched news for PYPL: rows=20
+[BAC_LOG] 2026-07-16 12:23:45 | Fetched news for MANE: rows=20
+[BAC_LOG] 2026-07-16 12:23:47 | Fetched news for MNSO: rows=20
+[BAC_LOG] 2026-07-16 12:23:47 | Fetched news for ERAS: rows=20
+[BAC_LOG] 2026-07-16 12:23:48 | Fetched news for RH: rows=20
+[BAC_LOG] 2026-07-16 12:23:48 | Ticker source=Auto-detect top gainers, input tickers=['LCID', 'CHRN', 'AEHR', 'MAAS', 'PYPL', 'MANE', 'MNSO', 'ERAS', 'RH', 'MESO'], period=1d, interval=1m, realtime_mode=True, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Valid tickers with price data=['LCID', 'CHRN', 'AEHR', 'MAAS', 'PYPL', 'MANE', 'MNSO', 'ERAS', 'RH', 'MESO']
+[BAC_LOG] 2026-07-16 12:23:49 | Detected top performers=[('LCID', 28.7879), ('CHRN', 28.7701), ('AEHR', 21.9136), ('MAAS', 17.4344), ('PYPL', 17.205), ('MANE', 12.281), ('MNSO', 9.4536), ('ERAS', 9.02564), ('RH', 9.00028), ('MESO', 8.96057)]
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=LCID, close_points=390, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=CHRN, close_points=270, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=AEHR, close_points=390, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=MAAS, close_points=56, forecast_points=0
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=PYPL, close_points=390, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=MANE, close_points=341, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=MNSO, close_points=333, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=ERAS, close_points=390, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=RH, close_points=372, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:49 | Charting ticker=MESO, close_points=206, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for LCID: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for CHRN: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for AEHR: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for MAAS: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for PYPL: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for MANE: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for MNSO: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for ERAS: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for RH: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Fetched news for MESO: rows=20
+[BAC_LOG] 2026-07-16 12:23:50 | Total combined news rows=200
+[BAC_LOG] 2026-07-16 12:23:53 | Ticker source=Auto-detect top gainers, input tickers=['LCID', 'CHRN', 'AEHR', 'MAAS', 'PYPL', 'MANE', 'MNSO', 'ERAS', 'RH', 'MESO'], period=1d, interval=5m, realtime_mode=True, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Valid tickers with price data=['LCID', 'CHRN', 'AEHR', 'MAAS', 'PYPL', 'MANE', 'MNSO', 'ERAS', 'RH', 'MESO']
+[BAC_LOG] 2026-07-16 12:23:53 | Detected top performers=[('LCID', 28.7879), ('CHRN', 28.7701), ('AEHR', 21.9136), ('MAAS', 17.4344), ('PYPL', 17.205), ('MANE', 12.281), ('MNSO', 9.4536), ('ERAS', 9.02564), ('RH', 9.00028), ('MESO', 8.96057)]
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=LCID, close_points=78, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=CHRN, close_points=78, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=AEHR, close_points=78, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=MAAS, close_points=34, forecast_points=0
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=PYPL, close_points=78, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=MANE, close_points=78, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=MNSO, close_points=78, forecast_points=30
+[BAC_LOG] 2026-07-16 12:23:53 | Charting ticker=ERAS, close_points=78, forecast_points=30
