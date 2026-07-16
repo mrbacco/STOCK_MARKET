@@ -20,7 +20,6 @@ st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
 MOMENTUM_PERIODS = 30
-MIN_FORECAST_TRAINING_POINTS = 30
 BACKTEST_TRAINING_POINTS = 60
 MAX_BACKTEST_POINTS = 30
 MIN_BACKTEST_POINTS = 5
@@ -147,11 +146,11 @@ def linear_trend_projection(prices: np.ndarray, points_ahead: int) -> np.ndarray
 
 def forecast_trend(close_series: pd.Series, points_ahead: int = 30) -> pd.DataFrame:
     prices = close_series.dropna().to_numpy(dtype=float)
-    if len(prices) < MIN_FORECAST_TRAINING_POINTS:
+    if len(prices) < BACKTEST_TRAINING_POINTS:
         return pd.DataFrame()
 
     # Fit a lightweight trend model for directional forecasting.
-    predictions = linear_trend_projection(prices, points_ahead)
+    predictions = linear_trend_projection(prices[-BACKTEST_TRAINING_POINTS:], points_ahead)
 
     return pd.DataFrame(
         {"projection_point": np.arange(1, points_ahead + 1), "pred_close": predictions}
@@ -327,7 +326,7 @@ scores = {t: growth_score(price_data[t]) for t in valid_tickers}
 ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 top_growers = [t for t, _ in ranked[: min(3, len(ranked))]]
 current_momentum_label = momentum_label(realtime_mode, interval)
-bac_log(f"Top growers (30-day score)={ranked[: min(3, len(ranked))]}")
+bac_log(f"Top movers ({current_momentum_label})={ranked[: min(3, len(ranked))]}")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Tracked Tickers", len(valid_tickers))
@@ -354,7 +353,8 @@ if realtime_mode:
 
 st.subheader("Top momentum stocks - history and linear trend projection")
 st.caption(
-    "The projection extrapolates the price trend only; it is not a price target. "
+    f"The projection extrapolates a linear trend fitted to the most recent {BACKTEST_TRAINING_POINTS} "
+    "observations; it is not a price target. "
     "Use the walk-forward backtest below to judge how it performed on recent unseen data."
 )
 for ticker in top_growers:
