@@ -18,7 +18,11 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
 
-DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+AUTO_SCREENER_QUERY = "day_gainers"
+AUTO_DETECTED_PERFORMERS = 10
+MAX_CHARTED_PERFORMERS = 10
+AUTO_SOURCE = "Auto-detect top gainers"
+MANUAL_SOURCE = "Manual tickers"
 MOMENTUM_PERIODS = 30
 BACKTEST_TRAINING_POINTS = 60
 MAX_BACKTEST_POINTS = 30
@@ -45,14 +49,89 @@ def parse_tickers(raw: str) -> List[str]:
     return clean
 
 
+@st.cache_data(ttl=60, max_entries=2)
+def get_detected_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+    columns = ["Ticker", "Company", "Daily change", "Last price"]
+    try:
+        response = yf.screen(AUTO_SCREENER_QUERY, count=max(limit * 3, 30))
+    except Exception as ex:
+        bac_log(f"Top-performer screener error: {ex}")
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    seen_tickers = set()
+    for quote in response.get("quotes", []):
+        if quote.get("quoteType") != "EQUITY":
+            continue
+
+        ticker = str(quote.get("symbol", "")).upper()
+        if not ticker or ticker in seen_tickers:
+            continue
+
+        try:
+            daily_change = float(quote.get("regularMarketChangePercent"))
+        except (TypeError, ValueError):
+            continue
+
+        if not np.isfinite(daily_change):
+            continue
+
+        try:
+            last_price = float(quote.get("regularMarketPrice"))
+        except (TypeError, ValueError):
+            last_price = np.nan
+
+        company = (
+            quote.get("longName")
+            or quote.get("shortName")
+            or quote.get("displayName")
+            or ticker
+        )
+        rows.append(
+            {
+                "Ticker": ticker,
+                "Company": company,
+                "Daily change": daily_change,
+                "Last price": last_price,
+            }
+        )
+        seen_tickers.add(ticker)
+
+        if len(rows) >= limit:
+            break
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Daily change", ascending=False)
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
+
+def format_price_history(history: pd.DataFrame) -> pd.DataFrame:
+    if history.empty:
+        return pd.DataFrame()
+
+    history = history.reset_index()
+    date_column = "Datetime" if "Datetime" in history.columns else "Date"
+    required_columns = {date_column, "Open", "High", "Low", "Close", "Volume"}
+    if not required_columns.issubset(history.columns):
+        return pd.DataFrame()
+
+    history = history[[date_column, "Open", "High", "Low", "Close", "Volume"]].rename(
+        columns={date_column: "Date"}
+    )
+    history["Date"] = pd.to_datetime(history["Date"]).dt.tz_localize(None)
+    return history
+
+
 @st.cache_data(ttl=60)
 def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    hist = yf.Ticker(ticker).history(period=period, interval=interval)
-    if hist.empty:
-        return pd.DataFrame()
-    hist = hist.reset_index()[["Date", "Open", "High", "Low", "Close", "Volume"]]
-    hist["Date"] = pd.to_datetime(hist["Date"]).dt.tz_localize(None)
-    return hist
+    history = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+    return format_price_history(history)
 
 
 @st.cache_data(ttl=30)
@@ -80,25 +159,20 @@ def get_price_history_batch(tickers: List[str], period: str, interval: str) -> d
     if data is None or data.empty:
         return result
 
-    # Handle the shape difference between single-ticker and multi-ticker responses.
+    # Handle both yfinance column orientations and date-index names.
     if isinstance(data.columns, pd.MultiIndex):
+        first_level = set(data.columns.get_level_values(0))
+        second_level = set(data.columns.get_level_values(1))
         for ticker in tickers:
-            if ticker not in data.columns.get_level_values(0):
+            if ticker in first_level:
+                ticker_data = data[ticker].copy()
+            elif ticker in second_level:
+                ticker_data = data.xs(ticker, axis=1, level=1).copy()
+            else:
                 continue
-            tdf = data[ticker].copy().dropna(how="all")
-            if tdf.empty:
-                continue
-            tdf = tdf.reset_index()[["Datetime", "Open", "High", "Low", "Close", "Volume"]]
-            tdf = tdf.rename(columns={"Datetime": "Date"})
-            tdf["Date"] = pd.to_datetime(tdf["Date"]).dt.tz_localize(None)
-            result[ticker] = tdf
+            result[ticker] = format_price_history(ticker_data.dropna(how="all"))
     else:
-        single = data.copy().dropna(how="all")
-        if not single.empty:
-            single = single.reset_index()[["Datetime", "Open", "High", "Low", "Close", "Volume"]]
-            single = single.rename(columns={"Datetime": "Date"})
-            single["Date"] = pd.to_datetime(single["Date"]).dt.tz_localize(None)
-            result[tickers[0]] = single
+        result[tickers[0]] = format_price_history(data.copy().dropna(how="all"))
 
     return result
 
@@ -263,12 +337,25 @@ st.caption("Public data, investing news, sentiment trends, and simple predictive
 
 with st.sidebar:
     st.header("Configuration")
-    raw_tickers = st.text_input(
-        "Tickers (comma-separated)",
-        ", ".join(DEFAULT_TICKERS),
-        help="Example: AAPL, MSFT, NVDA",
+    ticker_source = st.segmented_control(
+        "Ticker source",
+        [AUTO_SOURCE, MANUAL_SOURCE],
+        default=AUTO_SOURCE,
+        required=True,
+        key="ticker_source",
+        width="stretch",
     )
-    tickers = parse_tickers(raw_tickers)
+    raw_tickers = ""
+    if ticker_source == MANUAL_SOURCE:
+        raw_tickers = st.text_input(
+            "Tickers (comma-separated)",
+            help="Example: AAPL, MSFT, NVDA",
+        )
+    else:
+        st.caption(
+            "Uses Yahoo Finance's U.S. large-cap daily-gainers screen and charts the top 10 equities."
+        )
+
     realtime_mode = st.toggle("Real-time Mode", value=False)
 
     if realtime_mode:
@@ -285,28 +372,35 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+if ticker_source == AUTO_SOURCE:
+    detected_performers = get_detected_top_performers()
+    tickers = detected_performers["Ticker"].tolist()
+else:
+    detected_performers = pd.DataFrame()
+    tickers = parse_tickers(raw_tickers)
+
 if realtime_mode:
     st.info("Real-time mode is using manual refresh. Click 'Refresh now' to update values.")
 
 # Search terminal for [BAC_LOG] to track what the app is processing.
 bac_log(
-    f"Input tickers={tickers}, period={period}, interval={interval}, realtime_mode={realtime_mode}, forecast_points={forecast_points}"
+    f"Ticker source={ticker_source}, input tickers={tickers}, period={period}, interval={interval}, "
+    f"realtime_mode={realtime_mode}, forecast_points={forecast_points}"
 )
 
 if not tickers:
-    st.warning("Add at least one ticker symbol.")
+    if ticker_source == AUTO_SOURCE:
+        st.error("No top performers were returned by the market screener. Try refreshing in a moment.")
+    else:
+        st.warning("Add at least one ticker symbol.")
     st.stop()
 
-if realtime_mode:
-    realtime_tickers = tickers[:3]
-    if len(tickers) > 3:
-        st.warning("Real-time mode currently tracks the first 3 tickers to keep updates responsive.")
-        bac_log(f"Realtime ticker cap applied. Original={len(tickers)} using={realtime_tickers}")
-    price_data = get_price_history_batch(realtime_tickers, period=period, interval=interval)
-    active_tickers = realtime_tickers
-else:
-    price_data = {t: get_price_history(t, period=period, interval=interval) for t in tickers}
-    active_tickers = tickers
+active_tickers = tickers[:MAX_CHARTED_PERFORMERS]
+if len(tickers) > MAX_CHARTED_PERFORMERS:
+    st.info(f"Charting the first {MAX_CHARTED_PERFORMERS} symbols from the selected source.")
+
+with st.spinner("Loading price history for detected performers..."):
+    price_data = get_price_history_batch(active_tickers, period=period, interval=interval)
 
 valid_tickers = [t for t in active_tickers if not price_data[t].empty]
 bac_log(f"Valid tickers with price data={valid_tickers}")
@@ -314,28 +408,56 @@ bac_log(f"Valid tickers with price data={valid_tickers}")
 if realtime_mode and not valid_tickers:
     bac_log("Realtime fetch returned empty. Falling back to daily history for display stability")
     st.warning("Real-time data is temporarily unavailable. Showing recent daily history instead.")
-    fallback_tickers = active_tickers[:3]
-    price_data = {t: get_price_history(t, period="6mo", interval="1d") for t in fallback_tickers}
-    valid_tickers = [t for t in fallback_tickers if not price_data[t].empty]
+    price_data = get_price_history_batch(active_tickers, period="6mo", interval="1d")
+    valid_tickers = [t for t in active_tickers if not price_data[t].empty]
 
 if not valid_tickers:
     st.error("No price data was returned. Check ticker symbols and try again.")
     st.stop()
 
-scores = {t: growth_score(price_data[t]) for t in valid_tickers}
-ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-top_growers = [t for t, _ in ranked[: min(3, len(ranked))]]
-current_momentum_label = momentum_label(realtime_mode, interval)
-bac_log(f"Top movers ({current_momentum_label})={ranked[: min(3, len(ranked))]}")
+if ticker_source == AUTO_SOURCE:
+    daily_change_by_ticker = detected_performers.set_index("Ticker")["Daily change"].to_dict()
+    top_performers = [ticker for ticker in tickers if ticker in valid_tickers]
+    leader_label = "Top detected daily gainer"
+    performance_label = "Best detected daily change"
+    leader_change = daily_change_by_ticker.get(top_performers[0], np.nan)
+    performance_value = f"{leader_change:.2f}%" if pd.notna(leader_change) else "Unavailable"
+    bac_log(
+        f"Detected top performers={[(ticker, daily_change_by_ticker.get(ticker)) for ticker in top_performers]}"
+    )
+else:
+    scores = {ticker: growth_score(price_data[ticker]) for ticker in valid_tickers}
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    top_performers = [ticker for ticker, _ in ranked[:MAX_CHARTED_PERFORMERS]]
+    current_momentum_label = momentum_label(realtime_mode, interval)
+    leader_label = f"Top {current_momentum_label} mover"
+    performance_label = f"Best {current_momentum_label} growth"
+    performance_value = f"{ranked[0][1]:.2f}%"
+    bac_log(f"Top manual movers ({current_momentum_label})={ranked[:MAX_CHARTED_PERFORMERS]}")
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Tracked Tickers", len(valid_tickers))
-col2.metric(f"Top {current_momentum_label} mover", top_growers[0])
-col3.metric(f"Best {current_momentum_label} growth", f"{ranked[0][1]:.2f}%")
+col1.metric("Charted performers", len(top_performers))
+col2.metric(leader_label, top_performers[0])
+col3.metric(performance_label, performance_value)
+
+if ticker_source == AUTO_SOURCE:
+    st.subheader("Detected top 10 daily gainers")
+    st.caption(
+        "The screener is Yahoo Finance's predefined U.S. equity filter for liquid, large-cap daily gainers. "
+        "It is not a complete ranking of every listed stock."
+    )
+    st.dataframe(
+        detected_performers,
+        column_config={
+            "Daily change": st.column_config.NumberColumn("Daily change", format="%.2f%%"),
+            "Last price": st.column_config.NumberColumn("Last price", format="$%.2f"),
+        },
+        hide_index=True,
+    )
 
 if realtime_mode:
-    quote_cols = st.columns(min(3, len(top_growers)))
-    for i, ticker in enumerate(top_growers[:3]):
+    quote_cols = st.columns(min(3, len(top_performers)))
+    for i, ticker in enumerate(top_performers[:3]):
         price_series = price_data[ticker]["Close"].dropna()
         if len(price_series) >= 2:
             current_price = float(price_series.iloc[-1])
@@ -351,13 +473,18 @@ if realtime_mode:
         "not a live tick or daily change."
     )
 
-st.subheader("Top momentum stocks - history and linear trend projection")
+chart_heading = (
+    "Detected top 10 daily gainers - history and linear trend projection"
+    if ticker_source == AUTO_SOURCE
+    else "Top momentum stocks - history and linear trend projection"
+)
+st.subheader(chart_heading)
 st.caption(
     f"The projection extrapolates a linear trend fitted to the most recent {BACKTEST_TRAINING_POINTS} "
     "observations; it is not a price target. "
     "Use the walk-forward backtest below to judge how it performed on recent unseen data."
 )
-for ticker in top_growers:
+for ticker in top_performers:
     df = price_data[ticker]
     fc = forecast_trend(df["Close"], points_ahead=forecast_points)
     bac_log(
@@ -417,7 +544,7 @@ st.caption(
 )
 
 backtest_rows = []
-for ticker in top_growers:
+for ticker in top_performers:
     backtest = backtest_linear_trend(price_data[ticker])
     if not backtest.empty:
         backtest_rows.append(summarize_backtest(ticker, backtest))

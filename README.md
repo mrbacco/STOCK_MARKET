@@ -10,7 +10,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 ## Project Goals
 
-- Pull public market price data for selected stock tickers.
+- Detect current market leaders and pull their public price data.
 - Collect current investing-related news headlines.
 - Score headline sentiment to estimate short-term market mood.
 - Visualize momentum and trend projections for top performers.
@@ -19,6 +19,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 ## Current v1 Features
 
 - Public price data via Yahoo Finance.
+- Automatic detection of the top 10 eligible U.S. daily gainers through Yahoo Finance's screener.
 - Intraday mode with manual refresh controls.
 - Historical mode for reliable long-range visualization.
 - News aggregation from Google News RSS.
@@ -81,11 +82,12 @@ The default URL is usually:
 
 ## How To Use
 
-1. Enter tickers in the sidebar (comma-separated).
-2. Choose Real-time Mode for intraday tracking, or disable it for historical mode.
-3. Click Refresh now in real-time mode to manually reload fresh values.
-4. Review top growers, chart overlays, and news sentiment sections.
-5. Monitor terminal logs for BAC_LOG entries.
+1. Leave **Auto-detect top gainers** selected to chart the ten currently detected market leaders.
+2. Select **Manual tickers** if you want to enter specific symbols instead.
+3. Choose Real-time Mode for intraday tracking, or disable it for historical mode.
+4. Click Refresh now to refresh the screener, prices, and news.
+5. Review the detected-gainers table, chart overlays, and news sentiment sections.
+6. Monitor terminal logs for BAC_LOG entries.
 
 ## Forecasting Approach
 
@@ -104,12 +106,15 @@ returns.
 ## Data Sources
 
 - Price and volume: Yahoo Finance endpoints through yfinance.
+- Top-performer detection: Yahoo Finance's predefined `day_gainers` screener for eligible U.S. equities.
 - News headlines: Google News RSS ticker queries.
 - Sentiment scoring: VADER compound score on headline plus summary.
 
 ## Reliability Notes
 
 - Intraday endpoints can be slower or intermittently unavailable.
+- Auto-detection is a filtered Yahoo Finance screen for liquid, large-cap U.S. daily gainers; it is not
+  a complete ranking of every listed stock.
 - Intraday values are the latest returned bar closes; their deltas compare consecutive bars, not
   live ticks or daily changes.
 - The app includes fallback behavior and manual refresh flow to reduce lockups.
