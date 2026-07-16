@@ -19,6 +19,12 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
 
 DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+MOMENTUM_PERIODS = 30
+MIN_FORECAST_TRAINING_POINTS = 30
+BACKTEST_TRAINING_POINTS = 60
+MAX_BACKTEST_POINTS = 30
+MIN_BACKTEST_POINTS = 5
+INTRADAY_FREQUENCIES = {"1m": "1min", "2m": "2min", "5m": "5min"}
 analyzer = SentimentIntensityAnalyzer()
 
 
@@ -130,31 +136,127 @@ def get_news(ticker: str, max_items: int = 20) -> pd.DataFrame:
     return df
 
 
-def forecast_trend(close_series: pd.Series, days_ahead: int = 30) -> pd.DataFrame:
+def linear_trend_projection(prices: np.ndarray, points_ahead: int) -> np.ndarray:
+    x_values = np.arange(len(prices)).reshape(-1, 1)
+    model = LinearRegression()
+    model.fit(x_values, prices)
+
+    future_x_values = np.arange(len(prices), len(prices) + points_ahead).reshape(-1, 1)
+    return model.predict(future_x_values)
+
+
+def forecast_trend(close_series: pd.Series, points_ahead: int = 30) -> pd.DataFrame:
     prices = close_series.dropna().to_numpy(dtype=float)
-    if len(prices) < 30:
+    if len(prices) < MIN_FORECAST_TRAINING_POINTS:
         return pd.DataFrame()
 
     # Fit a lightweight trend model for directional forecasting.
-    x = np.arange(len(prices)).reshape(-1, 1)
-    y = prices
-    model = LinearRegression()
-    model.fit(x, y)
+    predictions = linear_trend_projection(prices, points_ahead)
 
-    future_x = np.arange(len(prices), len(prices) + days_ahead).reshape(-1, 1)
-    preds = model.predict(future_x)
-
-    return pd.DataFrame({"day": future_x.flatten(), "pred_close": preds})
+    return pd.DataFrame(
+        {"projection_point": np.arange(1, points_ahead + 1), "pred_close": predictions}
+    )
 
 
-def growth_score(df: pd.DataFrame) -> float:
-    if df.empty or len(df) < 30:
+@st.cache_data(max_entries=100)
+def backtest_linear_trend(
+    price_history: pd.DataFrame,
+    training_points: int = BACKTEST_TRAINING_POINTS,
+    max_test_points: int = MAX_BACKTEST_POINTS,
+) -> pd.DataFrame:
+    required_columns = {"Date", "Close"}
+    if not required_columns.issubset(price_history.columns):
+        return pd.DataFrame()
+
+    history = price_history[["Date", "Close"]].copy()
+    history["Close"] = pd.to_numeric(history["Close"], errors="coerce")
+    history = history.dropna().sort_values("Date").reset_index(drop=True)
+
+    available_test_points = len(history) - training_points
+    test_points = min(max_test_points, available_test_points)
+    if test_points < MIN_BACKTEST_POINTS:
+        return pd.DataFrame()
+
+    test_start_index = len(history) - test_points
+    rows = []
+    for target_index in range(test_start_index, len(history)):
+        training_prices = history["Close"].iloc[target_index - training_points : target_index].to_numpy(
+            dtype=float
+        )
+        last_training_close = float(training_prices[-1])
+        predicted_close = float(linear_trend_projection(training_prices, points_ahead=1)[0])
+        actual_close = float(history["Close"].iloc[target_index])
+
+        predicted_direction = np.sign(predicted_close - last_training_close)
+        actual_direction = np.sign(actual_close - last_training_close)
+        rows.append(
+            {
+                "date": history["Date"].iloc[target_index],
+                "actual_close": actual_close,
+                "predicted_close": predicted_close,
+                "baseline_close": last_training_close,
+                "absolute_error": abs(actual_close - predicted_close),
+                "baseline_absolute_error": abs(actual_close - last_training_close),
+                "direction_correct": bool(predicted_direction == actual_direction),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_backtest(ticker: str, backtest: pd.DataFrame) -> dict:
+    model_mae = float(backtest["absolute_error"].mean())
+    baseline_mae = float(backtest["baseline_absolute_error"].mean())
+    mape = float(
+        (
+            backtest["absolute_error"] / backtest["actual_close"].abs().replace(0, np.nan)
+        ).mean()
+        * 100
+    )
+    directional_accuracy = float(backtest["direction_correct"].mean() * 100)
+    mae_improvement = (
+        ((baseline_mae - model_mae) / baseline_mae) * 100 if baseline_mae > 0 else np.nan
+    )
+
+    return {
+        "Ticker": ticker,
+        "Forecasts": len(backtest),
+        "Model MAE": model_mae,
+        "MAPE": mape,
+        "Directional accuracy": directional_accuracy,
+        "No-change MAE": baseline_mae,
+        "MAE improvement vs. no-change": mae_improvement,
+    }
+
+
+def future_projection_dates(
+    last_date: pd.Timestamp, points_ahead: int, realtime_mode: bool, interval: str
+) -> pd.DatetimeIndex:
+    last_timestamp = pd.Timestamp(last_date)
+    if realtime_mode:
+        frequency = INTRADAY_FREQUENCIES[interval]
+        return pd.date_range(
+            start=last_timestamp + pd.Timedelta(frequency),
+            periods=points_ahead,
+            freq=frequency,
+        )
+    return pd.bdate_range(start=last_timestamp + pd.offsets.BDay(1), periods=points_ahead)
+
+
+def growth_score(df: pd.DataFrame, periods: int = MOMENTUM_PERIODS) -> float:
+    if df.empty or len(df) < periods + 1:
         return float("-inf")
-    start = df["Close"].iloc[-30]
+    start = df["Close"].iloc[-(periods + 1)]
     end = df["Close"].iloc[-1]
     if start == 0:
         return float("-inf")
     return ((end - start) / start) * 100.0
+
+
+def momentum_label(realtime_mode: bool, interval: str) -> str:
+    if realtime_mode:
+        return f"{MOMENTUM_PERIODS}-bar ({interval})"
+    return f"{MOMENTUM_PERIODS}-session"
 
 
 st.title("Stock Market Intelligence Dashboard")
@@ -173,11 +275,11 @@ with st.sidebar:
     if realtime_mode:
         period = st.selectbox("Intraday Window", ["1d", "5d"], index=0)
         interval = st.selectbox("Intraday Interval", ["1m", "2m", "5m"], index=0)
-        forecast_days = st.slider("Forecast Points", min_value=7, max_value=60, value=30)
+        forecast_points = st.slider("Trend projection bars", min_value=7, max_value=60, value=30)
     else:
         period = st.selectbox("History Window", ["6mo", "1y", "2y"], index=1)
         interval = "1d"
-        forecast_days = st.slider("Forecast Days", min_value=7, max_value=60, value=30)
+        forecast_points = st.slider("Trend projection business days", min_value=7, max_value=60, value=30)
 
     if st.button("Refresh now", type="primary"):
         bac_log("Manual refresh requested by user")
@@ -189,7 +291,7 @@ if realtime_mode:
 
 # Search terminal for [BAC_LOG] to track what the app is processing.
 bac_log(
-    f"Input tickers={tickers}, period={period}, interval={interval}, realtime_mode={realtime_mode}, forecast_points={forecast_days}"
+    f"Input tickers={tickers}, period={period}, interval={interval}, realtime_mode={realtime_mode}, forecast_points={forecast_points}"
 )
 
 if not tickers:
@@ -224,12 +326,13 @@ if not valid_tickers:
 scores = {t: growth_score(price_data[t]) for t in valid_tickers}
 ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 top_growers = [t for t, _ in ranked[: min(3, len(ranked))]]
+current_momentum_label = momentum_label(realtime_mode, interval)
 bac_log(f"Top growers (30-day score)={ranked[: min(3, len(ranked))]}")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Tracked Tickers", len(valid_tickers))
-col2.metric("Top Grower", top_growers[0])
-col3.metric("Best 30-Day Growth", f"{ranked[0][1]:.2f}%")
+col2.metric(f"Top {current_momentum_label} mover", top_growers[0])
+col3.metric(f"Best {current_momentum_label} growth", f"{ranked[0][1]:.2f}%")
 
 if realtime_mode:
     quote_cols = st.columns(min(3, len(top_growers)))
@@ -239,12 +342,24 @@ if realtime_mode:
             current_price = float(price_series.iloc[-1])
             previous_price = float(price_series.iloc[-2])
             delta_value = current_price - previous_price
-            quote_cols[i].metric(f"{ticker} Live", f"${current_price:.2f}", f"{delta_value:+.2f}")
+            quote_cols[i].metric(
+                f"{ticker} latest {interval} close",
+                f"${current_price:.2f}",
+                f"{delta_value:+.2f} vs. prior bar",
+            )
+    st.caption(
+        "Intraday figures use the latest returned bar close. The delta is versus the prior bar, "
+        "not a live tick or daily change."
+    )
 
-st.subheader("Top Growing Stocks - Historical + Predicted Trend")
+st.subheader("Top momentum stocks - history and linear trend projection")
+st.caption(
+    "The projection extrapolates the price trend only; it is not a price target. "
+    "Use the walk-forward backtest below to judge how it performed on recent unseen data."
+)
 for ticker in top_growers:
     df = price_data[ticker]
-    fc = forecast_trend(df["Close"], days_ahead=forecast_days)
+    fc = forecast_trend(df["Close"], points_ahead=forecast_points)
     bac_log(
         f"Charting ticker={ticker}, close_points={len(df)}, forecast_points={len(fc) if not fc.empty else 0}"
     )
@@ -273,25 +388,65 @@ for ticker in top_growers:
 
     if not fc.empty:
         last_date = df["Date"].iloc[-1]
-        future_dates = [last_date + dt.timedelta(days=i + 1) for i in range(len(fc))]
+        future_dates = future_projection_dates(last_date, len(fc), realtime_mode, interval)
         fig.add_trace(
             go.Scatter(
                 x=future_dates,
                 y=fc["pred_close"],
                 mode="lines",
-                name=f"{ticker} Forecast",
+                name=f"{ticker} Linear trend projection",
                 line={"dash": "dash", "width": 2},
             )
         )
 
     fig.update_layout(
-        title=f"{ticker}: Price Trend & Forecast",
-        xaxis_title="Date",
+        title=f"{ticker}: Price Trend & Linear Projection",
+        xaxis_title="Timestamp" if realtime_mode else "Date",
         yaxis_title="Price (USD)",
         template="plotly_white",
         height=420,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig)
+
+st.subheader("Forecast backtest")
+forecast_horizon_label = f"next {interval} bar" if realtime_mode else "next daily session"
+st.caption(
+    f"Walk-forward test of up to {MAX_BACKTEST_POINTS} unseen {forecast_horizon_label} forecasts. "
+    f"Each forecast is trained only on the preceding {BACKTEST_TRAINING_POINTS} observations and "
+    "compared with a no-change baseline."
+)
+
+backtest_rows = []
+for ticker in top_growers:
+    backtest = backtest_linear_trend(price_data[ticker])
+    if not backtest.empty:
+        backtest_rows.append(summarize_backtest(ticker, backtest))
+
+if backtest_rows:
+    st.dataframe(
+        pd.DataFrame(backtest_rows),
+        column_config={
+            "Model MAE": st.column_config.NumberColumn("Model MAE", format="$%.2f"),
+            "MAPE": st.column_config.NumberColumn("MAPE", format="%.2f%%"),
+            "Directional accuracy": st.column_config.NumberColumn(
+                "Directional accuracy", format="%.1f%%"
+            ),
+            "No-change MAE": st.column_config.NumberColumn("No-change MAE", format="$%.2f"),
+            "MAE improvement vs. no-change": st.column_config.NumberColumn(
+                "MAE improvement vs. no-change", format="%.1f%%"
+            ),
+        },
+        hide_index=True,
+    )
+    st.caption(
+        "Positive MAE improvement means the linear trend model beat the no-change baseline; "
+        "negative values mean it performed worse."
+    )
+else:
+    st.info(
+        "Not enough price observations to backtest this trend model. "
+        f"At least {BACKTEST_TRAINING_POINTS + MIN_BACKTEST_POINTS} observations are required."
+    )
 
 st.subheader("Investing News and Sentiment")
 news_frames = []
@@ -329,13 +484,12 @@ if news_frames:
         template="plotly_white",
         height=380,
     )
-    st.plotly_chart(bar, use_container_width=True)
+    st.plotly_chart(bar)
 
     st.dataframe(
         all_news[["ticker", "published", "title", "sentiment_label", "sentiment", "link"]]
         .sort_values(by="published", ascending=False)
         .reset_index(drop=True),
-        use_container_width=True,
     )
 else:
     bac_log("No news rows available from RSS fetch at this run")
@@ -343,5 +497,6 @@ else:
 
 st.caption(
     "Data sources: Yahoo Finance (prices) and Google News RSS (headlines). "
+    "Forecast quality is measured with a walk-forward backtest and no-change baseline. "
     "This dashboard provides directional insight only, not investment advice."
 )

@@ -25,6 +25,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - VADER sentiment scoring for each news item.
 - Top grower ranking using recent performance.
 - Interactive charts for close price and forecast trend.
+- Walk-forward backtests for the trend projection, including error and baseline metrics.
 - Terminal logging with BAC_LOG entries for observability.
 
 ## Architecture
@@ -94,6 +95,12 @@ The dashboard uses a lightweight linear regression model over recent closing pri
 - It works best as a quick trend indicator.
 - It should not be used as a sole decision engine for investing.
 
+The dashboard also reports a walk-forward backtest for each displayed ticker. It makes up to 30
+one-bar forecasts using only the preceding 60 observations, then compares those unseen outcomes
+with a no-change baseline. Model MAE, MAPE, directional accuracy, and MAE improvement versus the
+baseline show how the current trend model has recently performed. They do not guarantee future
+returns.
+
 ## Data Sources
 
 - Price and volume: Yahoo Finance endpoints through yfinance.
@@ -103,6 +110,8 @@ The dashboard uses a lightweight linear regression model over recent closing pri
 ## Reliability Notes
 
 - Intraday endpoints can be slower or intermittently unavailable.
+- Intraday values are the latest returned bar closes; their deltas compare consecutive bars, not
+  live ticks or daily changes.
 - The app includes fallback behavior and manual refresh flow to reduce lockups.
 - For best responsiveness in real-time mode, track a small number of symbols.
 
