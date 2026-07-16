@@ -21,6 +21,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Public price data via Yahoo Finance.
 - Ireland-first automatic detection of the top 10 daily performers from a tracked ISEQ 20 Euronext Dublin universe.
 - Optional U.S. large-cap daily-gainers screen through Yahoo Finance.
+- FTSE MIB benchmark-index tracking for the Italian market.
+- Manual ticker selection by geographical market, with searchable examples and custom Yahoo Finance symbols.
 - Separate Overview, Charts, and News views so heavier content loads only when selected.
 - Intraday mode with manual refresh controls.
 - Historical mode for reliable long-range visualization.
@@ -43,7 +45,14 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 ## Repository Structure
 
-- app.py: Main Streamlit application.
+- app.py: Main Streamlit entry point and sidebar workflow.
+- app_config.py: Shared constants and runtime configuration.
+- app_logging.py: Terminal logging and BAC_LOG helpers.
+- ticker_catalog.py: Geographical market presets, ticker examples, suffix rules, and currency labels.
+- market_data.py: Price, screener, news, and sentiment data loading.
+- forecasting.py: Feature engineering, forecasts, and walk-forward backtests.
+- views.py: Overview, Charts, and News rendering.
+- tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
 - requirements.txt: Python dependencies.
 - README.md: Project documentation.
 - LICENSE: MIT license.
@@ -86,10 +95,11 @@ The default URL is usually:
 
 1. Leave **Ireland: ISEQ 20 leaders** selected to rank the ten strongest latest daily moves in the Ireland-focused universe.
 2. Use **View** to select **Overview**, **Charts**, or **News**; select **Charts** to see the price charts and forecast backtests.
-3. Select **U.S. daily gainers** for the existing Yahoo Finance U.S. screener, or **Manual tickers** to enter specific symbols.
-4. Choose Real-time Mode for intraday tracking, or disable it for historical mode.
-5. Click Refresh now to refresh prices, rankings, and news.
-6. Monitor terminal logs for BAC_LOG entries.
+3. Select **Italy: FTSE MIB index** to track the Italian benchmark, or **U.S. daily gainers** for the Yahoo Finance U.S. screener.
+4. Select **Manual tickers**, choose a geographical market, and then select example securities or type another Yahoo Finance symbol.
+5. Choose Real-time Mode for intraday tracking, or disable it for historical mode.
+6. Click Refresh now to refresh prices, rankings, and news.
+7. Monitor terminal logs for BAC_LOG entries.
 
 ## Forecasting Approach
 
@@ -111,6 +121,7 @@ do not guarantee future returns.
 - Price and volume: Yahoo Finance endpoints through yfinance.
 - Ireland-first leader detection: a tracked ISEQ 20 Euronext Dublin universe, ranked from the latest available Yahoo Finance daily closes.
 - Optional U.S. leader detection: Yahoo Finance's predefined `day_gainers` screener for eligible U.S. equities.
+- Manual market catalogue: curated examples for major exchanges, with automatic Yahoo Finance suffix handling for custom symbols.
 - News headlines: Google News RSS ticker queries.
 - Sentiment scoring: VADER compound score on headline plus summary.
 

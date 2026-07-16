@@ -2,7 +2,9 @@
 # date: 2026-07-12
 # file: requirements.txt
 
-streamlit>=1.38.0
+# The manual market picker uses multiselect `accept_new_options` and modern
+# width parameters that are available in the project's tested Streamlit build.
+streamlit>=1.59.1
 yfinance>=0.2.54
 pandas>=2.3.0
 numpy>=2.1.1
