@@ -15,7 +15,7 @@ import pandas as pd
 import market_data
 import sentiment_service
 import sentiment_store
-from app_config import MANUAL_SOURCE
+from app_config import FTSE_MIB_SOURCE, MANUAL_SOURCE
 from app_logging import bac_log_kv, bac_log_section
 from streamlit.testing.v1 import AppTest
 
@@ -59,7 +59,7 @@ class ManualMarketUiTest(unittest.TestCase):
         """Replace public-data calls so this UI test is fast and deterministic."""
         bac_log_section("tests.manual_market_ui", "Applying deterministic loader patches.")
         cls.original_ireland_loader = market_data.get_iseq20_top_performers
-        cls.original_ftse_loader = market_data.get_ftse_mib_index
+        cls.original_ftse_loader = market_data.get_ftse_mib_top_performers
         cls.original_us_loader = market_data.get_us_top_performers
         cls.original_history_loader = market_data.get_price_history_batch
         cls.original_background_collector = sentiment_service.ensure_background_sentiment_collector
@@ -70,9 +70,9 @@ class ManualMarketUiTest(unittest.TestCase):
             "A5G.IR",
             "AIB Group",
         )
-        market_data.get_ftse_mib_index = lambda: _sample_leaderboard(
-            "FTSEMIB.MI",
-            "FTSE MIB",
+        market_data.get_ftse_mib_top_performers = lambda: _sample_leaderboard(
+            "ENEL.MI",
+            "Enel",
         )
         market_data.get_us_top_performers = lambda: _sample_leaderboard(
             "AAPL",
@@ -96,7 +96,7 @@ class ManualMarketUiTest(unittest.TestCase):
         """Restore the real loaders so this module has no global side effects."""
         bac_log_section("tests.manual_market_ui", "Restoring original data loaders.")
         market_data.get_iseq20_top_performers = cls.original_ireland_loader
-        market_data.get_ftse_mib_index = cls.original_ftse_loader
+        market_data.get_ftse_mib_top_performers = cls.original_ftse_loader
         market_data.get_us_top_performers = cls.original_us_loader
         market_data.get_price_history_batch = cls.original_history_loader
         sentiment_service.ensure_background_sentiment_collector = cls.original_background_collector
@@ -155,6 +155,31 @@ class ManualMarketUiTest(unittest.TestCase):
         active_view.set_value("Charts").run(timeout=60)
         self.assertEqual([], list(app.exception))
         self.assertTrue(any(subheader.value == "Forecast backtest" for subheader in app.subheader))
+
+    def test_italy_source_renders_ranked_leader_charts(self) -> None:
+        """Italy should use constituent-leader labels instead of the old index view."""
+        app = AppTest.from_file("app.py")
+        app.run(timeout=60)
+        ticker_source = next(
+            widget for widget in app.segmented_control if widget.label == "Ticker source"
+        )
+        ticker_source.set_value(FTSE_MIB_SOURCE).run(timeout=60)
+        active_view = next(
+            widget for widget in app.segmented_control if widget.label == "View"
+        )
+        active_view.set_value("Charts").run(timeout=60)
+
+        self.assertEqual([], list(app.exception))
+        self.assertTrue(
+            any(
+                subheader.value == "FTSE MIB top 10 daily performers"
+                for subheader in app.subheader
+            )
+        )
+        leader = next(
+            metric for metric in app.metric if metric.label == "Top FTSE MIB daily mover"
+        )
+        self.assertEqual("ENEL.MI", leader.value)
 
 
 if __name__ == "__main__":

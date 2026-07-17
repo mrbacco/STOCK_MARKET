@@ -10,7 +10,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 ## Project Goals
 
-- Detect current market leaders in an Ireland-focused stock universe and pull their public price data.
+- Detect and chart the ten strongest daily leaders for each automatic market source.
 - Collect current investing-related news headlines.
 - Score headline sentiment to estimate short-term market mood.
 - Visualize momentum and trend projections for top performers.
@@ -19,9 +19,10 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 ## Current v1 Features
 
 - Public price data via Yahoo Finance.
-- Ireland-first automatic detection of the top 10 daily performers from a tracked ISEQ 20 Euronext Dublin universe.
-- Optional U.S. large-cap daily-gainers screen through Yahoo Finance.
-- FTSE MIB benchmark-index tracking for the Italian market.
+- Automatic top-10 daily performer detection for tracked Ireland, Italy, and U.S. market sources.
+- Ireland ranking from a tracked ISEQ 20 Euronext Dublin universe.
+- Italy ranking across 39 Yahoo-supported FTSE MIB constituents.
+- U.S. large-cap daily-gainers ranking through Yahoo Finance.
 - Manual ticker selection by geographical market, with searchable examples and custom Yahoo Finance symbols.
 - Separate Overview, Charts, and News views so heavier content loads only when selected.
 - Intraday mode with manual refresh controls.
@@ -61,6 +62,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - sentiment_worker.py: Standalone continuous collector for 24/7 operation.
 - views.py: Overview, Charts, and News rendering.
 - tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
+- tests/test_market_leader_rankings.py: Offline ranking and ten-ticker-cap tests for automatic market sources.
 - tests/test_sentiment_pipeline.py: Offline persistence, leakage, feature, and promotion tests.
 - requirements.txt: Python dependencies.
 - README.md: Project documentation.
@@ -113,9 +115,9 @@ bounded watchlist most recently registered by the app.
 
 ## How To Use
 
-1. Leave **Ireland: ISEQ 20 leaders** selected to rank the ten strongest latest daily moves in the Ireland-focused universe.
+1. Choose **Ireland: ISEQ 20 leaders**, **Italy: FTSE MIB leaders**, or **U.S. daily gainers** to rank that source automatically.
 2. Use **View** to select **Overview**, **Charts**, or **News**; select **Charts** to see the price charts and forecast backtests.
-3. Select **Italy: FTSE MIB index** to track the Italian benchmark, or **U.S. daily gainers** for the Yahoo Finance U.S. screener.
+3. The Charts view automatically loads the highest-ranked ten supported tickers for the selected automatic market source.
 4. Select **Manual tickers**, choose a geographical market, and then select example securities or type another Yahoo Finance symbol.
 5. Choose Real-time Mode for intraday tracking, or disable it for historical mode.
 6. Click Refresh now to refresh prices, rankings, and news.
@@ -143,6 +145,7 @@ do not guarantee future returns.
 
 - Price and volume: Yahoo Finance endpoints through yfinance.
 - Ireland-first leader detection: a tracked ISEQ 20 Euronext Dublin universe, ranked from the latest available Yahoo Finance daily closes.
+- Italy leader detection: 39 current FTSE MIB constituents with Yahoo-supported Milan history, ranked from the latest available daily closes.
 - Optional U.S. leader detection: Yahoo Finance's predefined `day_gainers` screener for eligible U.S. equities.
 - Manual market catalogue: curated examples for major exchanges, with automatic Yahoo Finance suffix handling for custom symbols.
 - News headlines: Google News RSS ticker queries.
@@ -153,6 +156,7 @@ do not guarantee future returns.
 
 - Intraday endpoints can be slower or intermittently unavailable.
 - Ireland mode ranks a tracked ISEQ 20 Euronext Dublin universe; it is not a complete ranking of every Irish or European listing.
+- Italy mode ranks 39 FTSE MIB constituents. STMicroelectronics is omitted because Yahoo Finance does not currently return its Milan listing.
 - U.S. auto-detection is a filtered Yahoo Finance screen for liquid, large-cap daily gainers; it is not
   a complete ranking of every listed U.S. stock.
 - Intraday values are the latest returned bar closes; their deltas compare consecutive bars, not

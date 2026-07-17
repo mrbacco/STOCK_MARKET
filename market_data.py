@@ -14,7 +14,7 @@ mixing those concerns into the Streamlit layout code.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
+from typing import List, Mapping
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -22,8 +22,7 @@ import yfinance as yf
 
 from app_config import (
     AUTO_DETECTED_PERFORMERS,
-    FTSE_MIB_NAME,
-    FTSE_MIB_TICKER,
+    FTSE_MIB_MILAN_LISTINGS,
     ISEQ_20_DUBLIN_LISTINGS,
     MOMENTUM_PERIODS,
     US_SCREENER_QUERY,
@@ -265,9 +264,6 @@ def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame
         )
         seen_tickers.add(ticker)
 
-        if len(rows) >= limit:
-            break
-
     result = (
         pd.DataFrame(rows).sort_values("Daily change", ascending=False).head(limit).reset_index(drop=True)
         if rows
@@ -277,23 +273,26 @@ def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame
     return result
 
 
-@st.cache_data(ttl=300, max_entries=2)
-def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    """Rank the fixed Ireland universe by the latest daily change."""
-    bac_log_kv("market_data.get_iseq20_top_performers", limit=limit)
+def _rank_latest_daily_performers(
+    listings: Mapping[str, str],
+    limit: int,
+    log_context: str,
+) -> pd.DataFrame:
+    """Rank a fixed market universe by its latest two available daily closes."""
+    bac_log_kv(log_context, limit=limit, universe_size=len(listings))
     columns = ["Ticker", "Company", "Daily change", "Last price", "Last session"]
     price_data = get_price_history_batch(
-        list(ISEQ_20_DUBLIN_LISTINGS),
+        list(listings),
         period="5d",
         interval="1d",
     )
 
     rows = []
-    for ticker, company in ISEQ_20_DUBLIN_LISTINGS.items():
+    for ticker, company in listings.items():
         history = price_data.get(ticker, pd.DataFrame())
         if history.empty:
             bac_log_kv(
-                "market_data.get_iseq20_top_performers",
+                log_context,
                 ticker=ticker,
                 message="Skipped because no history was returned.",
             )
@@ -302,7 +301,7 @@ def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataF
         closes = history[["Date", "Close"]].dropna().sort_values("Date")
         if len(closes) < 2:
             bac_log_kv(
-                "market_data.get_iseq20_top_performers",
+                log_context,
                 ticker=ticker,
                 message="Skipped because fewer than two closes were available.",
             )
@@ -312,7 +311,7 @@ def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataF
         last_price = float(closes["Close"].iloc[-1])
         if previous_close == 0:
             bac_log_kv(
-                "market_data.get_iseq20_top_performers",
+                log_context,
                 ticker=ticker,
                 message="Skipped because the previous close was zero.",
             )
@@ -321,7 +320,7 @@ def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataF
         daily_change = ((last_price - previous_close) / previous_close) * 100
         if not np.isfinite(daily_change):
             bac_log_kv(
-                "market_data.get_iseq20_top_performers",
+                log_context,
                 ticker=ticker,
                 message="Skipped because the daily change was not finite.",
             )
@@ -342,64 +341,28 @@ def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataF
         if rows
         else pd.DataFrame(columns=columns)
     )
-    bac_log_kv("market_data.get_iseq20_top_performers", result_rows=len(result))
+    bac_log_kv(log_context, result_rows=len(result))
     return result
 
 
 @st.cache_data(ttl=300, max_entries=2)
-def get_ftse_mib_index() -> pd.DataFrame:
-    """Load the FTSE MIB index as a single tracked market source."""
-    bac_log_section("market_data.get_ftse_mib_index", "Loading FTSE MIB index history.")
-    columns = ["Ticker", "Company", "Daily change", "Last price", "Last session"]
-    price_data = get_price_history_batch([FTSE_MIB_TICKER], period="5d", interval="1d")
-    history = price_data.get(FTSE_MIB_TICKER, pd.DataFrame())
-
-    if history.empty:
-        bac_log_section("market_data.get_ftse_mib_index", "No FTSE MIB history was returned.")
-        return pd.DataFrame(columns=columns)
-
-    closes = history[["Date", "Close"]].dropna().sort_values("Date")
-    if len(closes) < 2:
-        bac_log_kv(
-            "market_data.get_ftse_mib_index",
-            message="Fewer than two close values were returned.",
-            close_rows=len(closes),
-        )
-        return pd.DataFrame(columns=columns)
-
-    previous_close = float(closes["Close"].iloc[-2])
-    last_price = float(closes["Close"].iloc[-1])
-    if previous_close == 0:
-        bac_log_section("market_data.get_ftse_mib_index", "Previous FTSE MIB close was zero.")
-        return pd.DataFrame(columns=columns)
-
-    daily_change = ((last_price - previous_close) / previous_close) * 100
-    if not np.isfinite(daily_change):
-        bac_log_kv(
-            "market_data.get_ftse_mib_index",
-            message="Daily change was not finite.",
-            daily_change=daily_change,
-        )
-        return pd.DataFrame(columns=columns)
-
-    result = pd.DataFrame(
-        [
-            {
-                "Ticker": FTSE_MIB_TICKER,
-                "Company": FTSE_MIB_NAME,
-                "Daily change": daily_change,
-                "Last price": last_price,
-                "Last session": pd.Timestamp(closes["Date"].iloc[-1]).date(),
-            }
-        ]
+def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+    """Rank the fixed Ireland universe by the latest daily change."""
+    return _rank_latest_daily_performers(
+        ISEQ_20_DUBLIN_LISTINGS,
+        limit,
+        "market_data.get_iseq20_top_performers",
     )
-    bac_log_kv(
-        "market_data.get_ftse_mib_index",
-        daily_change=daily_change,
-        last_price=last_price,
-        last_session=str(result["Last session"].iloc[0]),
+
+
+@st.cache_data(ttl=300, max_entries=2)
+def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+    """Rank Yahoo-supported FTSE MIB constituents by latest daily change."""
+    return _rank_latest_daily_performers(
+        FTSE_MIB_MILAN_LISTINGS,
+        limit,
+        "market_data.get_ftse_mib_top_performers",
     )
-    return result
 
 
 @st.cache_data(ttl=60, max_entries=200)

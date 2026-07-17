@@ -34,7 +34,11 @@ from app_config import (
     resolve_price_display,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
-from market_data import get_ftse_mib_index, get_iseq20_top_performers, get_us_top_performers
+from market_data import (
+    get_ftse_mib_top_performers,
+    get_iseq20_top_performers,
+    get_us_top_performers,
+)
 from sentiment_service import ensure_background_sentiment_collector
 from sentiment_store import get_collector_status, update_watchlist
 from ticker_catalog import (
@@ -57,7 +61,7 @@ st.set_page_config(
 bac_log_section("app", "Streamlit script booting.")
 
 st.title("Stock Market Intelligence Dashboard")
-st.caption("Ireland-focused market data, investing news, sentiment trends, and feature-based forecast charts")
+st.caption("Multi-market data, investing news, sentiment trends, and feature-based forecast charts")
 
 # Session defaults are re-applied on each rerun so stale widget state does not
 # leave the app in an invalid branch after a code or widget change.
@@ -144,7 +148,7 @@ with st.sidebar:
         )
     elif ticker_source == FTSE_MIB_SOURCE:
         st.caption(
-            "Tracks the FTSE MIB benchmark index from the Italian market as a single-source view."
+            "Ranks the Yahoo-supported FTSE MIB constituents by their latest available daily close and charts the top 10."
         )
     else:
         st.caption(
@@ -214,7 +218,7 @@ if ticker_source == IRELAND_SOURCE:
     detected_performers = get_iseq20_top_performers()
     tickers = detected_performers["Ticker"].tolist()
 elif ticker_source == FTSE_MIB_SOURCE:
-    detected_performers = get_ftse_mib_index()
+    detected_performers = get_ftse_mib_top_performers()
     tickers = detected_performers["Ticker"].tolist()
 elif ticker_source == US_SOURCE:
     detected_performers = get_us_top_performers()
@@ -272,7 +276,7 @@ if not tickers:
     if ticker_source == IRELAND_SOURCE:
         st.error("No ISEQ 20 price data was returned. Try refreshing in a moment.")
     elif ticker_source == FTSE_MIB_SOURCE:
-        st.error("No FTSE MIB index data was returned. Try refreshing in a moment.")
+        st.error("No FTSE MIB constituent data was returned. Try refreshing in a moment.")
     elif ticker_source == US_SOURCE:
         st.error("No top performers were returned by the market screener. Try refreshing in a moment.")
     else:

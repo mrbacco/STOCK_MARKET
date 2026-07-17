@@ -21,7 +21,7 @@ AUTO_DETECTED_PERFORMERS = 10
 MAX_CHARTED_PERFORMERS = 10
 
 IRELAND_SOURCE = "Ireland: ISEQ 20 leaders"
-FTSE_MIB_SOURCE = "Italy: FTSE MIB index"
+FTSE_MIB_SOURCE = "Italy: FTSE MIB leaders"
 US_SOURCE = "U.S. daily gainers"
 MANUAL_SOURCE = "Manual tickers"
 MARKET_SOURCES = (IRELAND_SOURCE, FTSE_MIB_SOURCE, US_SOURCE)
@@ -47,9 +47,6 @@ SENTIMENT_MAX_WATCHLIST = 25
 SENTIMENT_MODEL_NAME = "ProsusAI/finbert"
 SENTIMENT_FEATURE_WINDOW_HOURS = 24
 MIN_SENTIMENT_TRAINING_BARS = 10
-
-FTSE_MIB_TICKER = "FTSEMIB.MI"
-FTSE_MIB_NAME = "FTSE MIB index"
 
 INTRADAY_FREQUENCIES = {"1m": "1min", "2m": "2min", "5m": "5min"}
 
@@ -109,6 +106,52 @@ ISEQ_20_DUBLIN_LISTINGS = {
     "PTSB.IR": "Permanent TSB",
     "RYA.IR": "Ryanair Holdings",
     "UPR.IR": "Uniphar",
+}
+
+# The current FTSE MIB contains 40 companies. Yahoo Finance exposes Milan
+# history for 39 of them; STMicroelectronics' Milan symbol (STMMI) is omitted
+# because Yahoo does not currently return that local listing. This universe was
+# checked against Borsa Italiana's constituent list on 17 July 2026.
+FTSE_MIB_MILAN_LISTINGS = {
+    "A2A.MI": "A2A",
+    "AMP.MI": "Amplifon",
+    "AVIO.MI": "Avio",
+    "AZM.MI": "Azimut Holding",
+    "BMED.MI": "Banca Mediolanum",
+    "BMPS.MI": "Banca Monte dei Paschi di Siena",
+    "BAMI.MI": "Banco BPM",
+    "BPE.MI": "BPER Banca",
+    "BC.MI": "Brunello Cucinelli",
+    "BZU.MI": "Buzzi",
+    "CPR.MI": "Campari",
+    "DIA.MI": "DiaSorin",
+    "ENEL.MI": "Enel",
+    "ENI.MI": "Eni",
+    "RACE.MI": "Ferrari",
+    "FCT.MI": "Fincantieri",
+    "FBK.MI": "FinecoBank",
+    "G.MI": "Generali",
+    "HER.MI": "Hera",
+    "ISP.MI": "Intesa Sanpaolo",
+    "INW.MI": "Inwit",
+    "IG.MI": "Italgas",
+    "IVG.MI": "Iveco Group",
+    "LDO.MI": "Leonardo",
+    "LTMC.MI": "Lottomatica Group",
+    "MB.MI": "Mediobanca",
+    "MONC.MI": "Moncler",
+    "NEXI.MI": "Nexi",
+    "PST.MI": "Poste Italiane",
+    "PRY.MI": "Prysmian",
+    "REC.MI": "Recordati",
+    "SPM.MI": "Saipem",
+    "SRG.MI": "Snam",
+    "STLAM.MI": "Stellantis",
+    "TIT.MI": "Telecom Italia",
+    "TEN.MI": "Tenaris",
+    "TRN.MI": "Terna",
+    "UCG.MI": "UniCredit",
+    "UNI.MI": "Unipol",
 }
 
 

@@ -83,7 +83,7 @@ def render_overview_view(
             )
         elif ticker_source == FTSE_MIB_SOURCE:
             st.caption(
-                "This view tracks the latest available daily move for the FTSE MIB benchmark index."
+                "The leaderboard ranks the latest available daily close across Yahoo-supported FTSE MIB constituents."
             )
         else:
             st.caption(
@@ -244,8 +244,8 @@ def render_charts_view(
             leader_label = "Top ISEQ 20 daily mover"
             performance_label = "Best ISEQ 20 daily change"
         elif ticker_source == FTSE_MIB_SOURCE:
-            leader_label = "Tracked FTSE MIB index"
-            performance_label = "Latest FTSE MIB daily change"
+            leader_label = "Top FTSE MIB daily mover"
+            performance_label = "Best FTSE MIB daily change"
         else:
             leader_label = "Top detected daily gainer"
             performance_label = "Best detected daily change"
@@ -285,9 +285,9 @@ def render_charts_view(
                 "The leaderboard ranks the latest available daily close from the tracked ISEQ 20 Euronext Dublin universe. It is not a complete ranking of every Irish or European stock."
             )
         elif ticker_source == FTSE_MIB_SOURCE:
-            st.subheader("FTSE MIB benchmark index")
+            st.subheader("FTSE MIB top 10 daily performers")
             st.caption(
-                "This source charts the FTSE MIB benchmark index directly. It is an index view, not a ranked list of Italian constituents."
+                "The leaderboard ranks the 39 current FTSE MIB constituents with Yahoo-supported Milan history. STMicroelectronics is omitted because Yahoo does not return its Milan listing."
             )
         else:
             st.subheader("Detected top 10 daily gainers")
@@ -338,7 +338,7 @@ def render_charts_view(
     if ticker_source == IRELAND_SOURCE:
         chart_heading = "ISEQ 20 daily leaders - history and feature-based forecast"
     elif ticker_source == FTSE_MIB_SOURCE:
-        chart_heading = "FTSE MIB index - history and feature-based forecast"
+        chart_heading = "FTSE MIB top 10 - history and feature-based forecast"
     elif ticker_source == US_SOURCE:
         chart_heading = "Detected top 10 daily gainers - history and feature-based forecast"
     else:
