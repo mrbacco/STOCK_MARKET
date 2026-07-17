@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app_logging import bac_log_kv
+
 US_SCREENER_QUERY = "day_gainers"
 AUTO_DETECTED_PERFORMERS = 10
 MAX_CHARTED_PERFORMERS = 10
@@ -29,12 +31,22 @@ DEFAULT_TICKER_SOURCE = IRELAND_SOURCE
 DEFAULT_VIEW = "Overview"
 
 MOMENTUM_PERIODS = 30
-BACKTEST_TRAINING_POINTS = 60
+BACKTEST_TRAINING_POINTS = 120
 MAX_BACKTEST_POINTS = 30
 MIN_BACKTEST_POINTS = 5
 MODEL_LOOKBACK_POINTS = 180
 MIN_MODEL_TRAINING_ROWS = 30
 RSI_PERIOD = 14
+
+# Sentiment collection is intentionally frequent enough to capture short-lived
+# news changes without repeatedly hammering the RSS source. The standalone
+# worker and the in-process Streamlit collector share these settings.
+SENTIMENT_COLLECTION_INTERVAL_SECONDS = 300
+SENTIMENT_MAX_NEWS_ITEMS = 20
+SENTIMENT_MAX_WATCHLIST = 25
+SENTIMENT_MODEL_NAME = "ProsusAI/finbert"
+SENTIMENT_FEATURE_WINDOW_HOURS = 24
+MIN_SENTIMENT_TRAINING_BARS = 10
 
 FTSE_MIB_TICKER = "FTSEMIB.MI"
 FTSE_MIB_NAME = "FTSE MIB index"
@@ -43,7 +55,7 @@ INTRADAY_FREQUENCIES = {"1m": "1min", "2m": "2min", "5m": "5min"}
 
 # The feature list is centralized here so both the training and inference paths
 # always operate on the same ordered set of model inputs.
-MODEL_FEATURE_COLUMNS = (
+PRICE_FEATURE_COLUMNS = (
     "ret_1",
     "ret_3",
     "ret_5",
@@ -62,6 +74,17 @@ MODEL_FEATURE_COLUMNS = (
     "intraday_return",
     "range_pct",
 )
+
+# These aggregates are calculated strictly from headlines that were both
+# published and first observed before each forecast timestamp.
+SENTIMENT_FEATURE_COLUMNS = (
+    "sentiment_24h",
+    "sentiment_change_24h",
+    "news_count_24h",
+    "sentiment_disagreement_24h",
+)
+
+MODEL_FEATURE_COLUMNS = (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
 
 # The Ireland mode is intentionally explicit and finite, rather than using a
 # dynamic screener, because the app wants a stable, named market universe.
@@ -97,17 +120,34 @@ def initialize_session_defaults(session_state: Any) -> None:
     area that the app needs: `.get(...)` and item assignment.
     """
     if session_state is None or not hasattr(session_state, "get"):
+        bac_log_kv(
+            "app_config.initialize_session_defaults",
+            session_state_available=False,
+        )
         return
 
     try:
+        ticker_source_before = session_state.get("ticker_source")
+        active_view_before = session_state.get("active_view")
         if session_state.get("ticker_source") not in {*MARKET_SOURCES, MANUAL_SOURCE}:
             session_state["ticker_source"] = DEFAULT_TICKER_SOURCE
         if session_state.get("active_view") not in VIEW_OPTIONS:
             session_state["active_view"] = DEFAULT_VIEW
+        bac_log_kv(
+            "app_config.initialize_session_defaults",
+            ticker_source_before=ticker_source_before,
+            ticker_source_after=session_state.get("ticker_source"),
+            active_view_before=active_view_before,
+            active_view_after=session_state.get("active_view"),
+        )
     except Exception:
         # In bare Python execution or other non-Streamlit contexts, session
         # state may not behave like the normal runtime proxy. Silently skip so
         # the app can still be imported or statically checked.
+        bac_log_kv(
+            "app_config.initialize_session_defaults",
+            message="Session defaults could not be applied outside Streamlit runtime.",
+        )
         return
 
 
@@ -115,14 +155,36 @@ def resolve_price_display(ticker_source: str) -> tuple[str, str, str]:
     """Return the symbol, format string, and axis label for the active market."""
     euro_symbol = "\u20ac"
     if ticker_source in {IRELAND_SOURCE, FTSE_MIB_SOURCE}:
-        return euro_symbol, f"{euro_symbol}%.2f", "Price (EUR)"
+        display = (euro_symbol, f"{euro_symbol}%.2f", "Price (EUR)")
+        bac_log_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
+        return display
     if ticker_source == US_SOURCE:
-        return "$", "$%.2f", "Price (USD)"
-    return "", "%.2f", "Price (listing currency)"
+        display = ("$", "$%.2f", "Price (USD)")
+        bac_log_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
+        return display
+    display = ("", "%.2f", "Price (listing currency)")
+    bac_log_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
+    return display
 
 
 def selected_horizon_label(realtime_mode: bool, interval: str, forecast_points: int) -> str:
     """Translate the numeric horizon into a label that reads naturally in the UI."""
     if realtime_mode:
-        return f"{forecast_points} {interval} bars"
-    return f"{forecast_points} business days"
+        label = f"{forecast_points} {interval} bars"
+        bac_log_kv(
+            "app_config.selected_horizon_label",
+            realtime_mode=realtime_mode,
+            interval=interval,
+            forecast_points=forecast_points,
+            label=label,
+        )
+        return label
+    label = f"{forecast_points} business days"
+    bac_log_kv(
+        "app_config.selected_horizon_label",
+        realtime_mode=realtime_mode,
+        interval=interval,
+        forecast_points=forecast_points,
+        label=label,
+    )
+    return label

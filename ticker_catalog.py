@@ -398,7 +398,14 @@ def initialize_manual_market_state(session_state: Any) -> None:
 def format_manual_ticker_option(ticker: str, preset: ManualMarketPreset) -> str:
     """Show a friendly company name while retaining the ticker as the value."""
     company = preset.company_name(ticker)
-    return f"{company} ({ticker})" if company != ticker.upper() else ticker.upper()
+    formatted = f"{company} ({ticker})" if company != ticker.upper() else ticker.upper()
+    bac_log_kv(
+        "ticker_catalog.format_manual_ticker_option",
+        ticker=ticker,
+        company=company,
+        formatted=formatted,
+    )
+    return formatted
 
 
 def normalize_manual_tickers(

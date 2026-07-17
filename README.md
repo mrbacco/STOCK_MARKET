@@ -27,7 +27,9 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Intraday mode with manual refresh controls.
 - Historical mode for reliable long-range visualization.
 - News aggregation from Google News RSS.
-- VADER sentiment scoring for each news item.
+- Finance-specific FinBERT sentiment scoring with an automatic VADER fallback.
+- Five-minute background collection with deduplicated SQLite history.
+- Point-in-time 24-hour sentiment features and price-only versus sentiment model comparison.
 - Top grower ranking using recent performance.
 - Interactive charts for close price and feature-based forecasts.
 - Walk-forward backtests for the trend projection, including error and baseline metrics.
@@ -39,9 +41,10 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Market data: yfinance.
 - News feed parsing: feedparser.
 - Data processing: pandas and numpy.
-- Forecast model: scikit-learn Ridge regression on technical features.
+- Forecast model: scikit-learn Ridge regression on technical and lagged sentiment features.
 - Visualization: Plotly.
-- Sentiment analysis: vaderSentiment.
+- Sentiment analysis: ProsusAI FinBERT through Transformers, with vaderSentiment fallback.
+- Sentiment persistence: SQLite in the ignored `data/` directory.
 
 ## Repository Structure
 
@@ -51,8 +54,14 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - ticker_catalog.py: Geographical market presets, ticker examples, suffix rules, and currency labels.
 - market_data.py: Price, screener, news, and sentiment data loading.
 - forecasting.py: Feature engineering, forecasts, and walk-forward backtests.
+- sentiment_analysis.py: Cached FinBERT scoring and VADER fallback.
+- sentiment_features.py: Leakage-safe, point-in-time sentiment aggregates.
+- sentiment_service.py: RSS ingestion and the in-process background collector.
+- sentiment_store.py: SQLite schema, watchlist, news history, and collector status.
+- sentiment_worker.py: Standalone continuous collector for 24/7 operation.
 - views.py: Overview, Charts, and News rendering.
 - tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
+- tests/test_sentiment_pipeline.py: Offline persistence, leakage, feature, and promotion tests.
 - requirements.txt: Python dependencies.
 - README.md: Project documentation.
 - LICENSE: MIT license.
@@ -91,6 +100,17 @@ The default URL is usually:
 
 - http://localhost:8501
 
+The app starts one background sentiment collector per Streamlit process. It runs every five
+minutes while the app process is alive. To keep collecting when the dashboard is not open, run
+the standalone worker in a continuously supervised terminal or service:
+
+```bash
+python sentiment_worker.py
+```
+
+Use `python sentiment_worker.py --once` to test one collection cycle. The worker reads the
+bounded watchlist most recently registered by the app.
+
 ## How To Use
 
 1. Leave **Ireland: ISEQ 20 leaders** selected to rank the ten strongest latest daily moves in the Ireland-focused universe.
@@ -104,16 +124,19 @@ The default URL is usually:
 ## Forecasting Approach
 
 The dashboard uses a feature-based regression model that estimates future returns from recent
-momentum, volatility, RSI, price structure, and volume behavior.
+momentum, volatility, RSI, price structure, volume behavior, and optional point-in-time sentiment.
+The initial sentiment experiment is deliberately limited to daily forecasts of one to five
+business sessions.
 
 - It is directional, not predictive in a guaranteed sense.
 - It works best as a short-horizon market context tool.
 - It should not be used as a sole decision engine for investing.
 
-The dashboard also reports a walk-forward backtest for each displayed ticker. It evaluates the
-same user-selected forecast horizon using only the preceding 60 observations, then compares those
-unseen outcomes with a no-change baseline. Model MAE, MAPE, directional accuracy, and MAE
-improvement versus the baseline show how the current forecast setup has recently performed. They
+The dashboard reports a walk-forward backtest for each displayed ticker. It evaluates the same
+user-selected forecast horizon using only the preceding 120 observations. The price-plus-sentiment
+candidate is evaluated against the otherwise identical price-only model and is promoted only when
+its recent walk-forward MAE is lower. It also remains unavailable until at least ten historical
+price bars have observable news. Model MAE, MAPE, directional accuracy, and baseline comparisons
 do not guarantee future returns.
 
 ## Data Sources
@@ -123,7 +146,8 @@ do not guarantee future returns.
 - Optional U.S. leader detection: Yahoo Finance's predefined `day_gainers` screener for eligible U.S. equities.
 - Manual market catalogue: curated examples for major exchanges, with automatic Yahoo Finance suffix handling for custom symbols.
 - News headlines: Google News RSS ticker queries.
-- Sentiment scoring: VADER compound score on headline plus summary.
+- Sentiment scoring: FinBERT positive, neutral, and negative probabilities on headline plus summary.
+- Historical sentiment: local SQLite records containing publication, first-seen, and scoring timestamps.
 
 ## Reliability Notes
 
@@ -152,7 +176,7 @@ It is not financial advice, trading advice, or portfolio management advice.
 - Backtesting and model error metrics.
 - Advanced indicators such as RSI, MACD, and Bollinger Bands.
 - Portfolio risk scoring and drawdown analytics.
-- Non-blocking background refresh and async data ingestion.
+- Historical-news provider integration for a longer sentiment baseline immediately after setup.
 
 ## Author
 

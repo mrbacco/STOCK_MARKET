@@ -36,7 +36,7 @@ from forecasting import (
     backtest_forecast_model,
     forecast_feature_model,
     future_projection_dates,
-    summarize_backtest,
+    summarize_model_comparison,
 )
 from market_data import (
     get_price_history_batch,
@@ -44,6 +44,7 @@ from market_data import (
     load_news_frames_parallel,
     momentum_label,
 )
+from sentiment_store import load_sentiment_history
 
 
 def render_overview_view(
@@ -158,6 +159,13 @@ def render_overview_view(
                     f"{price_prefix}{current_price:.2f}",
                     f"{price_prefix}{delta_value:+.2f} vs. prior bar",
                 )
+            else:
+                bac_log_kv(
+                    "views.render_overview_view.quote",
+                    ticker=ticker,
+                    message="Skipped metric because fewer than two close values were available.",
+                    close_points=len(price_series),
+                )
 
     summary_frame = pd.DataFrame(
         [
@@ -171,6 +179,7 @@ def render_overview_view(
     )
     bac_log_kv("views.render_overview_view", summary_rows=len(summary_frame))
     st.dataframe(summary_frame, hide_index=True)
+    bac_log_section("views.render_overview_view", "Overview rendering completed.")
 
 
 def render_charts_view(
@@ -314,6 +323,13 @@ def render_charts_view(
                     f"{price_prefix}{current_price:.2f}",
                     f"{price_prefix}{delta_value:+.2f} vs. prior bar",
                 )
+            else:
+                bac_log_kv(
+                    "views.render_charts_view.quote",
+                    ticker=ticker,
+                    message="Skipped realtime metric because fewer than two close values were available.",
+                    close_points=len(price_series),
+                )
         st.caption(
             "Intraday figures use the latest returned bar close. The delta is versus the prior bar, not a live tick or daily change."
         )
@@ -330,7 +346,7 @@ def render_charts_view(
 
     st.subheader(chart_heading)
     st.caption(
-        f"The dashed forecast estimates returns from recent momentum, volatility, RSI, price structure, and volume features. The backtest below scores the same {horizon_label} horizon against a no-change baseline, so the chart and validation stay aligned."
+        f"The dashed forecast estimates returns from technical features and, on daily horizons, a continuously evaluated sentiment candidate. The same {horizon_label} walk-forward test promotes sentiment only when it improves MAE over the price-only model."
     )
 
     backtest_rows = []
@@ -343,13 +359,48 @@ def render_charts_view(
             forecast_points=forecast_points,
         )
 
-        fc = forecast_feature_model(df, points_ahead=forecast_points)
-        backtest = backtest_forecast_model(df, forecast_horizon=forecast_points)
+        price_fc = forecast_feature_model(df, points_ahead=forecast_points)
+        price_backtest = backtest_forecast_model(df, forecast_horizon=forecast_points)
+        sentiment_history = load_sentiment_history(ticker) if not realtime_mode else pd.DataFrame()
+        sentiment_fc = pd.DataFrame()
+        sentiment_backtest = pd.DataFrame()
+        if not realtime_mode and not sentiment_history.empty:
+            sentiment_fc = forecast_feature_model(
+                df,
+                points_ahead=forecast_points,
+                sentiment_history=sentiment_history,
+                include_sentiment=True,
+            )
+            sentiment_backtest = backtest_forecast_model(
+                df,
+                forecast_horizon=forecast_points,
+                sentiment_history=sentiment_history,
+                include_sentiment=True,
+            )
+
+        comparison = None
+        if not price_backtest.empty:
+            comparison = summarize_model_comparison(
+                ticker,
+                price_backtest,
+                sentiment_backtest,
+                forecast_points,
+            )
+        sentiment_promoted = bool(
+            comparison is not None
+            and comparison["Active model"] == "Price + sentiment"
+            and not sentiment_fc.empty
+        )
+        fc = sentiment_fc if sentiment_promoted else price_fc
+        backtest = sentiment_backtest if sentiment_promoted else price_backtest
+        active_model = "Price + sentiment" if sentiment_promoted else "Price only"
         bac_log_kv(
             "views.render_charts_view.ticker",
             ticker=ticker,
             forecast_rows=len(fc),
             backtest_rows=len(backtest),
+            sentiment_articles=len(sentiment_history),
+            sentiment_promoted=sentiment_promoted,
         )
 
         fig = go.Figure()
@@ -384,7 +435,7 @@ def render_charts_view(
                     x=future_dates,
                     y=fc["pred_close"],
                     mode="lines",
-                    name=f"{ticker} Forecast model",
+                    name=f"{ticker} {active_model} forecast",
                     line={"dash": "dash", "width": 2},
                 )
             )
@@ -406,12 +457,14 @@ def render_charts_view(
             confidence = "Unavailable"
             directional_accuracy = np.nan
             mae_improvement = np.nan
+            sentiment_status = "Intraday model is price-only" if realtime_mode else "Collecting history"
 
-            if not backtest.empty:
-                summary = summarize_backtest(ticker, backtest, forecast_points)
+            if comparison is not None:
+                summary = dict(comparison)
                 confidence = summary["Confidence"]
                 directional_accuracy = float(summary["Directional accuracy"])
                 mae_improvement = float(summary["MAE improvement vs. no-change"])
+                sentiment_status = str(summary["Sentiment status"])
                 summary["Projected return"] = current_return_pct
                 summary["Projected close"] = current_close
                 backtest_rows.append(summary)
@@ -434,10 +487,10 @@ def render_charts_view(
                 confidence=confidence,
             )
             st.caption(
-                f"{ticker}: current {horizon_label} forecast {current_return_pct:+.2f}% to {price_prefix}{current_close:.2f}. Confidence: {confidence}. Recent backtest: {accuracy_text}, {improvement_text}."
+                f"{ticker}: current {horizon_label} {active_model.lower()} forecast {current_return_pct:+.2f}% to {price_prefix}{current_close:.2f}. Backtest rating: {confidence}. Recent backtest: {accuracy_text}, {improvement_text}. Sentiment: {sentiment_status}."
             )
-        elif not backtest.empty:
-            backtest_rows.append(summarize_backtest(ticker, backtest, forecast_points))
+        elif comparison is not None:
+            backtest_rows.append(comparison)
 
     st.subheader("Forecast backtest")
     st.caption(
@@ -465,11 +518,26 @@ def render_charts_view(
                 "MAE improvement vs. no-change": st.column_config.NumberColumn(
                     "MAE improvement vs. no-change", format="%.1f%%"
                 ),
+                "Price-only MAE": st.column_config.NumberColumn(
+                    "Price-only MAE", format=price_format
+                ),
+                "Sentiment MAE": st.column_config.NumberColumn(
+                    "Sentiment MAE", format=price_format
+                ),
+                "Price-only directional accuracy": st.column_config.NumberColumn(
+                    "Price-only directional accuracy", format="%.1f%%"
+                ),
+                "Sentiment directional accuracy": st.column_config.NumberColumn(
+                    "Sentiment directional accuracy", format="%.1f%%"
+                ),
+                "Sentiment MAE lift vs. price-only": st.column_config.NumberColumn(
+                    "Sentiment MAE lift vs. price-only", format="%.1f%%"
+                ),
             },
             hide_index=True,
         )
         st.caption(
-            "Positive MAE improvement means the feature model beat the no-change baseline on the selected horizon; negative values mean it performed worse."
+            "Positive sentiment MAE lift means the augmented model beat the otherwise identical price-only model. Sentiment remains under evaluation until enough point-in-time history exists and is promoted only when that lift is positive."
         )
     else:
         bac_log_section("views.render_charts_view", "No backtest summary rows were available.")
@@ -477,6 +545,7 @@ def render_charts_view(
             "Not enough price observations to backtest this forecast model. "
             f"At least {BACKTEST_TRAINING_POINTS + forecast_points + MIN_BACKTEST_POINTS - 1} observations are required."
         )
+    bac_log_section("views.render_charts_view", "Charts rendering completed.")
 
 
 def render_news_view(
@@ -536,19 +605,35 @@ def render_news_view(
         bar.update_layout(
             title="Average news sentiment by ticker",
             xaxis_title="Ticker",
-            yaxis_title="Compound sentiment score",
+            yaxis_title="Financial sentiment score",
             template="plotly_white",
             height=380,
         )
         st.plotly_chart(bar)
 
         news_table = (
-            all_news[["ticker", "published", "title", "sentiment_label", "sentiment", "link"]]
+            all_news[
+                [
+                    "ticker",
+                    "published",
+                    "first_seen_at",
+                    "source",
+                    "title",
+                    "sentiment_label",
+                    "sentiment",
+                    "positive_probability",
+                    "neutral_probability",
+                    "negative_probability",
+                    "model_name",
+                    "link",
+                ]
+            ]
             .sort_values(by="published", ascending=False)
             .reset_index(drop=True)
         )
         bac_log_kv("views.render_news_view", news_table_rows=len(news_table))
         st.dataframe(news_table)
+        bac_log_section("views.render_news_view", "News rendering completed with rows.")
     else:
         bac_log_section("views.render_news_view", "No news rows were available.")
         st.info("No news items were fetched right now. Try again in a moment.")

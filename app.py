@@ -35,6 +35,8 @@ from app_config import (
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
 from market_data import get_ftse_mib_index, get_iseq20_top_performers, get_us_top_performers
+from sentiment_service import ensure_background_sentiment_collector
+from sentiment_store import get_collector_status, update_watchlist
 from ticker_catalog import (
     DEFAULT_MANUAL_MARKET,
     format_manual_ticker_option,
@@ -162,9 +164,10 @@ with st.sidebar:
         interval = "1d"
         forecast_points = st.slider(
             "Forecast horizon business days",
-            min_value=7,
-            max_value=60,
-            value=30,
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="Sentiment is initially validated on short, news-sensitive horizons.",
         )
     bac_log_kv(
         "app.sidebar",
@@ -276,6 +279,25 @@ if not tickers:
         st.warning("Choose at least one ticker from the selected market, or type a custom symbol.")
     st.stop()
 
+# Persist the current universe before the shared worker starts. The collector
+# continues polling this bounded watchlist independently of Streamlit reruns.
+company_by_ticker = (
+    {
+        str(ticker): str(company)
+        for ticker, company in detected_performers.set_index("Ticker")["Company"].to_dict().items()
+    }
+    if not detected_performers.empty and "Company" in detected_performers.columns
+    else {ticker: ticker for ticker in tickers}
+)
+update_watchlist({ticker: company_by_ticker.get(ticker, ticker) for ticker in tickers})
+ensure_background_sentiment_collector()
+collector_status = get_collector_status()
+st.caption(
+    "Sentiment collector: active every 5 minutes while the app is running · "
+    f"{collector_status.get('article_count', 0)} stored articles · "
+    f"{collector_status.get('watchlist_count', 0)} tracked tickers."
+)
+
 # Delegate the heavy rendering work to the dedicated view modules.
 if active_view == "Overview":
     bac_log_section("app", "Rendering overview view.")
@@ -315,6 +337,7 @@ st.caption(
     "Data sources: Yahoo Finance (prices) and Google News RSS (headlines). "
     "Ireland mode ranks a tracked ISEQ 20 Euronext Dublin universe by the latest available daily close. "
     "Forecast quality is measured with a horizon-matched walk-forward backtest and no-change baseline. "
+    "The sentiment candidate is promoted only after it beats the price-only model in recent walk-forward MAE. "
     "This dashboard provides directional insight only, not investment advice."
 )
 

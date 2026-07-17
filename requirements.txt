@@ -14,3 +14,5 @@ vaderSentiment>=3.3.2
 scikit-learn>=1.6.0
 requests>=2.32.3
 beautifulsoup4>=4.12.3
+transformers>=4.53.0,<6
+torch>=2.7.0

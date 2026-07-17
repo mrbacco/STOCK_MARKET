@@ -15,14 +15,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
-from urllib.parse import quote_plus
-
-import feedparser
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from app_config import (
     AUTO_DETECTED_PERFORMERS,
@@ -33,9 +29,8 @@ from app_config import (
     US_SCREENER_QUERY,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
-
-# The sentiment analyzer is created once and then reused for every news item.
-analyzer = SentimentIntensityAnalyzer()
+from sentiment_service import collect_tickers_once
+from sentiment_store import load_sentiment_history
 
 
 def parse_tickers(raw: str) -> List[str]:
@@ -407,48 +402,21 @@ def get_ftse_mib_index() -> pd.DataFrame:
     return result
 
 
-@st.cache_data(ttl=900, max_entries=200)
+@st.cache_data(ttl=60, max_entries=200)
 def get_news(ticker: str, company_name: str = "", max_items: int = 20) -> pd.DataFrame:
-    """Fetch Google News RSS headlines and attach a simple sentiment score."""
-    query = quote_plus(f"{company_name or ticker} stock investing")
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    """Collect current headlines and return persistent financial sentiment."""
     bac_log_kv(
         "market_data.get_news",
         ticker=ticker,
         company_name=company_name,
         max_items=max_items,
-        query=query,
     )
-
-    feed = feedparser.parse(url)
-    rows = []
-    for entry in feed.entries[:max_items]:
-        published = getattr(entry, "published", "")
-        summary = getattr(entry, "summary", "")
-        title = getattr(entry, "title", "")
-        link = getattr(entry, "link", "")
-        score = analyzer.polarity_scores(f"{title}. {summary}")["compound"]
-        rows.append(
-            {
-                "ticker": ticker,
-                "published": published,
-                "title": title,
-                "summary": summary,
-                "link": link,
-                "sentiment": score,
-            }
-        )
-
-    if not rows:
+    collect_tickers_once({ticker: company_name or ticker})
+    result = load_sentiment_history(ticker, limit=max_items)
+    if result.empty:
         bac_log_kv("market_data.get_news", ticker=ticker, result_rows=0)
         return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-    result["sentiment_label"] = pd.cut(
-        result["sentiment"],
-        bins=[-1.0, -0.05, 0.05, 1.0],
-        labels=["Negative", "Neutral", "Positive"],
-    )
+    result = result.rename(columns={"published_at": "published"})
     bac_log_kv("market_data.get_news", ticker=ticker, result_rows=len(result))
     return result
 
@@ -502,6 +470,10 @@ def load_news_frames_parallel(
             executor.submit(get_news, ticker, company_by_ticker.get(ticker, "")): ticker
             for ticker in tickers
         }
+        bac_log_kv(
+            "market_data.load_news_frames_parallel",
+            submitted_jobs=len(futures),
+        )
         for future in as_completed(futures):
             ticker = futures[future]
             try:
