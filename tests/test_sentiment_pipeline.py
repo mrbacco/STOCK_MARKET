@@ -138,6 +138,70 @@ class SentimentPipelineTest(unittest.TestCase):
         self.assertEqual(1.0, features["news_count_24h"].iloc[1])
         self.assertAlmostEqual(0.7, features["sentiment_24h"].iloc[1])
 
+    def test_daily_sentiment_stops_at_actual_exchange_close(self) -> None:
+        """After-close news belongs to the next forecast origin, not today's bar."""
+        price_history = pd.DataFrame({"Date": [pd.Timestamp("2025-01-02")]})
+        before_close = _news_row(first_seen_at="2025-01-02T20:00:00Z")
+        before_close.update(
+            {
+                "published_at": "2025-01-02T20:00:00Z",
+                "title": "Test company raises full-year guidance",
+                "source": "Reuters",
+            }
+        )
+        after_close = dict(before_close)
+        after_close.update(
+            {
+                "published_at": "2025-01-02T22:00:00Z",
+                "first_seen_at": "2025-01-02T22:00:00Z",
+                "title": "Test company gives an after-close update",
+            }
+        )
+
+        features = build_sentiment_feature_frame(
+            price_history,
+            pd.DataFrame([before_close, after_close]),
+            market_calendar="NYSE",
+        )
+
+        self.assertEqual(1.0, features["news_count_24h"].iloc[0])
+
+    def test_syndicated_headlines_count_once_and_recency_is_weighted(self) -> None:
+        price_history = pd.DataFrame({"Date": [pd.Timestamp("2026-01-03 15:00:00")]})
+        old_negative = _news_row(first_seen_at="2026-01-03T03:00:00Z")
+        old_negative.update(
+            {
+                "published_at": "2026-01-03T03:00:00Z",
+                "title": "Test company profit warning",
+                "source": "Unknown Blog",
+                "sentiment": -0.8,
+                "negative_probability": 0.9,
+            }
+        )
+        recent_positive = _news_row(first_seen_at="2026-01-03T14:00:00Z")
+        recent_positive.update(
+            {
+                "published_at": "2026-01-03T14:00:00Z",
+                "title": "Test company raises guidance - Reuters",
+                "source": "Reuters",
+                "sentiment": 0.8,
+                "negative_probability": 0.05,
+            }
+        )
+        syndicated_copy = dict(recent_positive)
+        syndicated_copy["title"] = "Test company raises guidance - Another Publisher"
+        syndicated_copy["source"] = "Another Publisher"
+
+        features = build_sentiment_feature_frame(
+            price_history,
+            pd.DataFrame([old_negative, recent_positive, syndicated_copy]),
+        )
+
+        self.assertEqual(2.0, features["news_count_24h"].iloc[0])
+        self.assertGreater(features["recency_weighted_sentiment_24h"].iloc[0], 0.0)
+        self.assertGreater(features["event_intensity_24h"].iloc[0], 0.0)
+        self.assertGreaterEqual(features["source_quality_24h"].iloc[0], 0.6)
+
     def test_sentiment_columns_join_training_frame(self) -> None:
         dates = pd.date_range("2025-01-01", periods=180, freq="B")
         close = 100 + np.linspace(0, 20, len(dates)) + np.sin(np.arange(len(dates)) / 5)
@@ -168,30 +232,56 @@ class SentimentPipelineTest(unittest.TestCase):
         self.assertTrue(set(SENTIMENT_FEATURE_COLUMNS).issubset(training.columns))
 
     def test_sentiment_is_promoted_only_when_mae_improves(self) -> None:
+        # Promotion needs enough *paired* origins to avoid declaring a winner
+        # from a tiny or differently timed sample.
         common = {
-            "date": pd.date_range("2026-01-01", periods=5),
-            "actual_close": [100.0] * 5,
-            "baseline_close": [98.0] * 5,
-            "baseline_absolute_error": [2.0] * 5,
-            "direction_correct": [True] * 5,
+            "date": pd.date_range("2026-01-01", periods=20),
+            "actual_close": [100.0] * 20,
+            "baseline_close": [98.0] * 20,
+            "baseline_absolute_error": [2.0] * 20,
+            "direction_correct": [True] * 20,
         }
         price = pd.DataFrame(
             {
                 **common,
-                "predicted_close": [99.0] * 5,
-                "absolute_error": [1.0] * 5,
+                "predicted_close": [99.0] * 20,
+                "absolute_error": [1.0] * 20,
             }
         )
         sentiment = pd.DataFrame(
             {
                 **common,
-                "predicted_close": [99.5] * 5,
-                "absolute_error": [0.5] * 5,
+                "predicted_close": [99.5] * 20,
+                "absolute_error": [0.5] * 20,
             }
         )
         comparison = summarize_model_comparison("TEST", price, sentiment, 3)
         self.assertEqual("Price + sentiment", comparison["Active model"])
         self.assertAlmostEqual(50.0, comparison["Sentiment MAE lift vs. price-only"])
+        self.assertEqual(20, comparison["Paired forecasts"])
+
+    def test_sentiment_is_not_promoted_from_mismatched_dates(self) -> None:
+        """A good one-day sentiment sample must not beat a longer price sample."""
+        dates = pd.date_range("2026-01-01", periods=20)
+        price = pd.DataFrame(
+            {
+                "date": dates,
+                "actual_close": [100.0] * 20,
+                "predicted_close": [99.0] * 20,
+                "baseline_close": [98.0] * 20,
+                "absolute_error": [1.0] * 20,
+                "baseline_absolute_error": [2.0] * 20,
+                "direction_correct": [True] * 20,
+            }
+        )
+        sentiment = price.tail(1).copy()
+        sentiment["predicted_close"] = 99.9
+        sentiment["absolute_error"] = 0.1
+
+        comparison = summarize_model_comparison("TEST", price, sentiment, 3)
+
+        self.assertEqual("Price only", comparison["Active model"])
+        self.assertIn("1/20", comparison["Sentiment status"])
 
 
 if __name__ == "__main__":

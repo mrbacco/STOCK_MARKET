@@ -67,6 +67,10 @@ st.caption("Multi-market data, investing news, sentiment trends, and feature-bas
 # leave the app in an invalid branch after a code or widget change.
 initialize_session_defaults(st.session_state)
 initialize_manual_market_state(st.session_state)
+# Start the daemon before any market-data branch can call `st.stop()`.  On a
+# temporary screener failure it can therefore continue collecting the persisted
+# watchlist and feeding future predictions in the background.
+sentiment_collector = ensure_background_sentiment_collector()
 bac_log_kv(
     "app.session_defaults",
     active_view=st.session_state.get("active_view"),
@@ -294,7 +298,16 @@ company_by_ticker = (
     else {ticker: ticker for ticker in tickers}
 )
 update_watchlist({ticker: company_by_ticker.get(ticker, ticker) for ticker in tickers})
-ensure_background_sentiment_collector()
+if sentiment_collector is not None and hasattr(sentiment_collector, "request_collection"):
+    sentiment_collector.request_collection()
+else:
+    # Streamlit's offline AppTest harness replaces the cached background
+    # resource with `None`.  The app remains renderable in that deterministic
+    # environment while normal runtime processes still wake the real daemon.
+    bac_log_section(
+        "app.sentiment_collector",
+        "Immediate wake-up unavailable in this runtime.",
+    )
 collector_status = get_collector_status()
 st.caption(
     "Sentiment collector: active every 5 minutes while the app is running · "

@@ -17,7 +17,9 @@ from typing import Any
 from app_logging import bac_log_kv
 
 US_SCREENER_QUERY = "day_gainers"
-AUTO_DETECTED_PERFORMERS = 10
+# Automatic markets now keep a wider candidate pool for the cross-sectional
+# model.  The UI still charts exactly the best ten *predicted* candidates.
+AUTO_DETECTED_PERFORMERS = 40
 MAX_CHARTED_PERFORMERS = 10
 
 IRELAND_SOURCE = "Ireland: ISEQ 20 leaders"
@@ -33,7 +35,10 @@ DEFAULT_VIEW = "Overview"
 MOMENTUM_PERIODS = 30
 BACKTEST_TRAINING_POINTS = 120
 MAX_BACKTEST_POINTS = 30
-MIN_BACKTEST_POINTS = 5
+# Model promotion decisions must be based on a meaningful run of genuinely
+# paired, out-of-sample forecasts.  Twenty is intentionally conservative while
+# remaining practical with the one-year price history fetched by the app.
+MIN_BACKTEST_POINTS = 20
 MODEL_LOOKBACK_POINTS = 180
 MIN_MODEL_TRAINING_ROWS = 30
 RSI_PERIOD = 14
@@ -43,12 +48,55 @@ RSI_PERIOD = 14
 # worker and the in-process Streamlit collector share these settings.
 SENTIMENT_COLLECTION_INTERVAL_SECONDS = 300
 SENTIMENT_MAX_NEWS_ITEMS = 20
-SENTIMENT_MAX_WATCHLIST = 25
+SENTIMENT_MAX_WATCHLIST = 50
 SENTIMENT_MODEL_NAME = "ProsusAI/finbert"
 SENTIMENT_FEATURE_WINDOW_HOURS = 24
 MIN_SENTIMENT_TRAINING_BARS = 10
 
 INTRADAY_FREQUENCIES = {"1m": "1min", "2m": "2min", "5m": "5min"}
+
+# `pandas_market_calendars` identifiers used to keep projected timestamps inside
+# real exchange sessions (including holidays and shortened trading days).
+MARKET_CALENDAR_BY_SOURCE = {
+    IRELAND_SOURCE: "XDUB",
+    FTSE_MIB_SOURCE: "XMIL",
+    US_SOURCE: "NYSE",
+}
+
+# Manual symbols do not carry a selected source name into every modeling call,
+# so their Yahoo suffix is enough to choose the most likely primary exchange.
+MARKET_CALENDAR_BY_SUFFIX = {
+    ".IR": "XDUB",
+    ".MI": "XMIL",
+    ".L": "LSE",
+    ".DE": "XETR",
+    ".PA": "XPAR",
+    ".AS": "XAMS",
+    ".MC": "XMAD",
+    ".TO": "TSX",
+    ".AX": "ASX",
+    ".T": "JPX",
+    ".HK": "HKEX",
+    ".SW": "SIX",
+}
+
+# These times are only a resilience fallback when the optional calendar package
+# cannot be imported.  Normal app execution uses the full exchange schedule.
+FALLBACK_MARKET_SESSION_HOURS = {
+    "NYSE": ("09:30", "16:00"),
+    "XDUB": ("08:00", "16:30"),
+    "XMIL": ("09:00", "17:30"),
+    "LSE": ("08:00", "16:30"),
+    "XETR": ("09:00", "17:30"),
+    "XPAR": ("09:00", "17:30"),
+    "XAMS": ("09:00", "17:30"),
+    "XMAD": ("09:00", "17:30"),
+    "TSX": ("09:30", "16:00"),
+    "ASX": ("10:00", "16:00"),
+    "JPX": ("09:00", "15:30"),
+    "HKEX": ("09:30", "16:00"),
+    "SIX": ("09:00", "17:30"),
+}
 
 # The feature list is centralized here so both the training and inference paths
 # always operate on the same ordered set of model inputs.
@@ -79,9 +127,69 @@ SENTIMENT_FEATURE_COLUMNS = (
     "sentiment_change_24h",
     "news_count_24h",
     "sentiment_disagreement_24h",
+    "recency_weighted_sentiment_24h",
+    "negative_share_24h",
+    "news_volume_shock_24h",
+    "source_quality_24h",
+    "source_diversity_24h",
+    "sentiment_relevance_24h",
+    "event_intensity_24h",
 )
 
 MODEL_FEATURE_COLUMNS = (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
+
+# Cross-sectional context lets the market-wide model distinguish a stock's own
+# momentum from a move shared by the whole selected exchange.  These names are
+# centralized because training, inference, diagnostics, and tests all rely on
+# the exact same feature order.
+MARKET_CONTEXT_FEATURE_COLUMNS = (
+    "market_ret_1",
+    "market_ret_5",
+    "market_ret_20",
+    "relative_strength_5",
+    "relative_strength_20",
+    "market_volatility_20",
+    "market_breadth_1",
+    "rolling_beta_20",
+    "rolling_correlation_20",
+    "log_dollar_volume",
+)
+PANEL_FEATURE_COLUMNS = (
+    *PRICE_FEATURE_COLUMNS,
+    *SENTIMENT_FEATURE_COLUMNS,
+    *MARKET_CONTEXT_FEATURE_COLUMNS,
+)
+
+# Three chronological partitions keep model weighting and final performance
+# evaluation separate.  A forecast-horizon gap is inserted between partitions.
+PANEL_MIN_BASE_TRAINING_DATES = 60
+PANEL_TUNING_DATES = 30
+PANEL_EVALUATION_DATES = 30
+PANEL_RANDOM_STATE = 42
+
+
+def resolve_market_calendar(ticker_source: str | None, ticker: str = "") -> str:
+    """Return the best exchange-calendar identifier for the active context."""
+    if ticker_source in MARKET_CALENDAR_BY_SOURCE:
+        calendar_name = MARKET_CALENDAR_BY_SOURCE[ticker_source]
+    else:
+        ticker_upper = str(ticker).upper()
+        calendar_name = next(
+            (
+                calendar
+                for suffix, calendar in MARKET_CALENDAR_BY_SUFFIX.items()
+                if ticker_upper.endswith(suffix)
+            ),
+            "NYSE",
+        )
+
+    bac_log_kv(
+        "app_config.resolve_market_calendar",
+        ticker_source=ticker_source,
+        ticker=ticker,
+        calendar_name=calendar_name,
+    )
+    return calendar_name
 
 # The Ireland mode is intentionally explicit and finite, rather than using a
 # dynamic screener, because the app wants a stable, named market universe.

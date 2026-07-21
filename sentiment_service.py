@@ -41,9 +41,24 @@ def _normalized_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
-def _content_hash(title: str, source: str) -> str:
-    normalized = f"{_normalized_text(title)}|{_normalized_text(source)}"
+def _content_hash(title: str, _source: str) -> str:
+    # Syndicated headlines commonly appear under several publisher names.  Hash
+    # the normalized headline itself so those copies are scored and stored once.
+    title_without_source = re.split(r"\s[-|]\s", str(title), maxsplit=1)[0]
+    normalized = re.sub(r"[^a-z0-9]+", " ", _normalized_text(title_without_source)).strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _google_news_locale(ticker: str) -> tuple[str, str, str]:
+    """Prefer local-market publishers while keeping FinBERT's English input."""
+    ticker_upper = str(ticker).upper()
+    if ticker_upper.endswith(".IR"):
+        return "en-IE", "IE", "IE:en"
+    if ticker_upper.endswith(".MI"):
+        return "en", "IT", "IT:en"
+    if ticker_upper.endswith(".L"):
+        return "en-GB", "GB", "GB:en"
+    return "en-US", "US", "US:en"
 
 
 def _published_timestamp(entry: Any, fallback: pd.Timestamp) -> pd.Timestamp:
@@ -70,8 +85,12 @@ def fetch_news_candidates(
     max_items: int = SENTIMENT_MAX_NEWS_ITEMS,
 ) -> list[dict[str, Any]]:
     """Fetch and normalize recent RSS entries without scoring them yet."""
-    query = quote_plus(f'"{company_name or ticker}" stock investing')
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    query = quote_plus(f'"{company_name or ticker}" stock investing when:2d')
+    language, country, edition = _google_news_locale(ticker)
+    url = (
+        "https://news.google.com/rss/search"
+        f"?q={query}&hl={language}&gl={country}&ceid={edition}"
+    )
     first_seen = pd.Timestamp.now(tz="UTC")
     feed = feedparser.parse(url)
     candidates: list[dict[str, Any]] = []
@@ -96,7 +115,13 @@ def fetch_news_candidates(
                 "content_hash": _content_hash(title, source),
             }
         )
-    bac_log_kv("sentiment.fetch", ticker=ticker, candidates=len(candidates))
+    bac_log_kv(
+        "sentiment.fetch",
+        ticker=ticker,
+        candidates=len(candidates),
+        language=language,
+        country=country,
+    )
     return candidates
 
 
@@ -196,6 +221,10 @@ class BackgroundSentimentCollector:
         self.poll_seconds = max(int(poll_seconds), 60)
         self.db_path = db_path
         self._stop_event = threading.Event()
+        # A separate wake event lets Streamlit notify the worker immediately
+        # when the selected market changes, instead of waiting up to five minutes
+        # for the next scheduled cycle.
+        self._wake_event = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
             name="sentiment-collector",
@@ -210,6 +239,12 @@ class BackgroundSentimentCollector:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._wake_event.set()
+
+    def request_collection(self) -> None:
+        """Wake the daemon so a newly updated watchlist is collected promptly."""
+        self._wake_event.set()
+        bac_log_section("sentiment.background", "Immediate collection requested.")
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -221,7 +256,12 @@ class BackgroundSentimentCollector:
                     set_collector_state("last_error", str(ex), db_path=self.db_path)
                 except Exception:
                     pass
-            self._stop_event.wait(self.poll_seconds)
+            # Clear only a wake that this wait actually observed.  If a request
+            # arrives just after a timeout, leaving the flag set guarantees the
+            # next cycle sees it instead of losing the notification in a race.
+            collection_requested = self._wake_event.wait(self.poll_seconds)
+            if collection_requested:
+                self._wake_event.clear()
         bac_log_section("sentiment.background", "Collector thread stopped.")
 
 

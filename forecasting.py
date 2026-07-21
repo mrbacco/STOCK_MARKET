@@ -4,7 +4,8 @@
 # file: forecasting.py
 #############################
 
-"""Forecast-model helpers and backtesting utilities.
+"""
+Forecast-model helpers and backtesting utilities.
 
 This module owns the technical feature engineering, model fitting, prediction,
 and walk-forward validation logic. The Streamlit UI calls into these helpers
@@ -22,6 +23,7 @@ from sklearn.preprocessing import StandardScaler
 
 from app_config import (
     BACKTEST_TRAINING_POINTS,
+    FALLBACK_MARKET_SESSION_HOURS,
     INTRADAY_FREQUENCIES,
     MAX_BACKTEST_POINTS,
     MIN_BACKTEST_POINTS,
@@ -33,6 +35,13 @@ from app_config import (
 )
 from app_logging import bac_log_kv, bac_log_section
 from sentiment_features import build_sentiment_feature_frame, has_sufficient_sentiment_history
+
+try:
+    # The full calendar is preferred because it knows exchange holidays, early
+    # closes, daylight-saving transitions, and intra-session boundaries.
+    import pandas_market_calendars as market_calendars
+except ImportError:  # pragma: no cover - exercised only in degraded installs.
+    market_calendars = None
 
 
 def prepare_model_history(price_history: pd.DataFrame) -> pd.DataFrame:
@@ -97,6 +106,7 @@ def build_feature_frame(
     sentiment_history: pd.DataFrame | None = None,
     include_sentiment: bool = False,
     latest_sentiment_as_of: object | None = None,
+    market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
     """Create the ordered technical and optional point-in-time sentiment matrix."""
     feature_columns = (
@@ -152,6 +162,7 @@ def build_feature_frame(
             history,
             sentiment_history,
             latest_as_of=latest_sentiment_as_of,
+            market_calendar=market_calendar,
         )
         cleaned_features = pd.concat([cleaned_features, sentiment_features], axis=1)
     bac_log_kv(
@@ -167,6 +178,7 @@ def build_forecast_training_frame(
     forecast_horizon: int,
     sentiment_history: pd.DataFrame | None = None,
     include_sentiment: bool = False,
+    market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
     """Join features and target returns into one training table for the model."""
     bac_log_kv(
@@ -193,6 +205,7 @@ def build_forecast_training_frame(
         history,
         sentiment_history=sentiment_history,
         include_sentiment=include_sentiment,
+        market_calendar=market_calendar,
     )
     target_log_return = np.log(history["Close"].shift(-forecast_horizon) / history["Close"])
     training_frame = pd.concat([history[["Date", "Close"]], feature_frame], axis=1)
@@ -247,12 +260,48 @@ def fit_forecast_model(
     return model
 
 
+def _training_frame_from_precomputed_features(
+    history: pd.DataFrame,
+    feature_frame: pd.DataFrame,
+    forecast_horizon: int,
+    feature_columns: tuple[str, ...],
+    include_sentiment: bool,
+    end_index: int | None = None,
+    start_index: int | None = None,
+) -> pd.DataFrame:
+    """Build one horizon target without recalculating backward-looking features.
+
+    `end_index` is a forecast origin.  Training rows are explicitly capped at
+    `origin - horizon`, ensuring every target was already realized at that
+    origin.  This is the horizon embargo inside each walk-forward step.
+    """
+    target_log_return = np.log(
+        history["Close"].shift(-forecast_horizon) / history["Close"]
+    )
+    frame = pd.concat([history[["Date", "Close"]], feature_frame], axis=1)
+    frame["target_log_return"] = target_log_return
+    if end_index is not None:
+        realized_target_end = end_index - forecast_horizon
+        frame = frame.iloc[(start_index or 0) : realized_target_end + 1]
+    elif start_index is not None:
+        frame = frame.iloc[start_index:]
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=[*feature_columns, "target_log_return"]
+    )
+    if len(frame) > MODEL_LOOKBACK_POINTS:
+        frame = frame.iloc[-MODEL_LOOKBACK_POINTS:]
+    if include_sentiment and not has_sufficient_sentiment_history(frame):
+        return pd.DataFrame()
+    return frame.reset_index(drop=True)
+
+
 def predict_horizon_close(
     price_history: pd.DataFrame,
     forecast_horizon: int,
     sentiment_history: pd.DataFrame | None = None,
     include_sentiment: bool = False,
     prediction_as_of: object | None = None,
+    market_calendar: str = "NYSE",
 ) -> dict:
     """Predict the close price at the requested horizon using the latest feature row."""
     bac_log_kv(
@@ -277,6 +326,7 @@ def predict_horizon_close(
         sentiment_history=sentiment_history,
         include_sentiment=include_sentiment,
         latest_sentiment_as_of=prediction_as_of,
+        market_calendar=market_calendar,
     )
     if feature_frame.empty:
         bac_log_section("forecast.predict_horizon_close", "Prediction aborted because features were empty.")
@@ -295,6 +345,7 @@ def predict_horizon_close(
         forecast_horizon,
         sentiment_history=sentiment_history,
         include_sentiment=include_sentiment,
+        market_calendar=market_calendar,
     )
     model = fit_forecast_model(training_frame, feature_columns=feature_columns)
     if model is None:
@@ -329,33 +380,65 @@ def forecast_feature_model(
     points_ahead: int = 30,
     sentiment_history: pd.DataFrame | None = None,
     include_sentiment: bool = False,
+    market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
-    """Build a forward curve by predicting each future horizon independently."""
+    """Build a forward curve while reusing one point-in-time feature matrix."""
     bac_log_kv("forecast.forecast_feature_model", points_ahead=points_ahead, history_rows=len(price_history))
+    history = prepare_model_history(price_history)
+    if history.empty:
+        return pd.DataFrame()
+    feature_columns = (
+        (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
+        if include_sentiment
+        else PRICE_FEATURE_COLUMNS
+    )
+    feature_frame = build_feature_frame(
+        history,
+        sentiment_history=sentiment_history,
+        include_sentiment=include_sentiment,
+        latest_sentiment_as_of=pd.Timestamp.now(tz="UTC"),
+        market_calendar=market_calendar,
+    )
+    latest_features = feature_frame.iloc[[-1]].replace([np.inf, -np.inf], np.nan)
+    if latest_features.loc[:, feature_columns].isna().any(axis=None):
+        bac_log_section(
+            "forecast.forecast_feature_model",
+            "Latest feature row was incomplete; no forward curve was created.",
+        )
+        return pd.DataFrame()
+
+    last_close = float(history["Close"].iloc[-1])
     rows = []
     for forecast_horizon in range(1, points_ahead + 1):
-        prediction = predict_horizon_close(
-            price_history,
+        training_frame = _training_frame_from_precomputed_features(
+            history,
+            feature_frame,
             forecast_horizon,
-            sentiment_history=sentiment_history,
-            include_sentiment=include_sentiment,
-            prediction_as_of=pd.Timestamp.now(tz="UTC"),
+            feature_columns,
+            include_sentiment,
         )
-        if not prediction:
+        model = fit_forecast_model(training_frame, feature_columns=feature_columns)
+        if model is None:
             bac_log_kv(
                 "forecast.forecast_feature_model",
                 stopping_horizon=forecast_horizon,
-                message="Stopped building the forecast curve because a prediction was unavailable.",
+                message="Stopped because the horizon model could not be fitted.",
             )
             break
+
+        predicted_log_return = float(
+            model.predict(latest_features.loc[:, feature_columns])[0]
+        )
+        predicted_close = last_close * float(np.exp(predicted_log_return))
+        predicted_return = float(np.exp(predicted_log_return) - 1.0)
 
         rows.append(
             {
                 "projection_point": forecast_horizon,
-                "pred_close": prediction["predicted_close"],
-                "pred_return": prediction["predicted_return"],
-                "training_rows": prediction["training_rows"],
-                "model_type": prediction["model_type"],
+                "pred_close": predicted_close,
+                "pred_return": predicted_return,
+                "training_rows": len(training_frame),
+                "model_type": "Price + sentiment" if include_sentiment else "Price only",
             }
         )
 
@@ -372,6 +455,7 @@ def backtest_forecast_model(
     max_test_points: int = MAX_BACKTEST_POINTS,
     sentiment_history: pd.DataFrame | None = None,
     include_sentiment: bool = False,
+    market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
     """Run a walk-forward backtest that matches the user-selected forecast horizon."""
     bac_log_kv(
@@ -407,27 +491,51 @@ def backtest_forecast_model(
         return pd.DataFrame()
 
     test_start_training_end = len(history) - forecast_horizon - test_points
+    feature_columns = (
+        (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
+        if include_sentiment
+        else PRICE_FEATURE_COLUMNS
+    )
+    feature_frame = build_feature_frame(
+        history,
+        sentiment_history=sentiment_history,
+        include_sentiment=include_sentiment,
+        market_calendar=market_calendar,
+    )
     rows = []
     for training_end_index in range(test_start_training_end, len(history) - forecast_horizon):
         training_start_index = training_end_index - training_points + 1
-        training_slice = history.iloc[training_start_index : training_end_index + 1].copy()
-        prediction = predict_horizon_close(
-            training_slice,
+        training_frame = _training_frame_from_precomputed_features(
+            history,
+            feature_frame,
             forecast_horizon,
-            sentiment_history=sentiment_history,
-            include_sentiment=include_sentiment,
+            feature_columns,
+            include_sentiment,
+            end_index=training_end_index,
+            start_index=training_start_index,
         )
-        if not prediction:
+        latest_features = feature_frame.iloc[[training_end_index]].replace(
+            [np.inf, -np.inf], np.nan
+        )
+        model = fit_forecast_model(training_frame, feature_columns=feature_columns)
+        if (
+            model is None
+            or latest_features.loc[:, feature_columns].isna().any(axis=None)
+        ):
             bac_log_kv(
                 "forecast.backtest_forecast_model",
                 training_end_index=training_end_index,
-                message="Skipped one backtest step because the prediction was unavailable.",
+                message="Skipped one step because training or origin features were unavailable.",
             )
             continue
 
-        baseline_close = float(training_slice["Close"].iloc[-1])
-        predicted_close = float(prediction["predicted_close"])
+        baseline_close = float(history["Close"].iloc[training_end_index])
+        predicted_log_return = float(
+            model.predict(latest_features.loc[:, feature_columns])[0]
+        )
+        predicted_close = baseline_close * float(np.exp(predicted_log_return))
         actual_close = float(history["Close"].iloc[training_end_index + forecast_horizon])
+        actual_log_return = float(np.log(actual_close / baseline_close))
         predicted_direction = np.sign(predicted_close - baseline_close)
         actual_direction = np.sign(actual_close - baseline_close)
         row = {
@@ -438,6 +546,9 @@ def backtest_forecast_model(
             "absolute_error": abs(actual_close - predicted_close),
             "baseline_absolute_error": abs(actual_close - baseline_close),
             "direction_correct": bool(predicted_direction == actual_direction),
+            "actual_log_return": actual_log_return,
+            "predicted_log_return": predicted_log_return,
+            "return_residual": actual_log_return - predicted_log_return,
         }
         rows.append(row)
         bac_log_kv(
@@ -451,7 +562,72 @@ def backtest_forecast_model(
         )
 
     result = pd.DataFrame(rows)
+
+    # The potential test-window size can overstate the *realized* sample count:
+    # individual steps may be skipped when sentiment or rolling features are not
+    # yet available.  Never expose a statistically tiny result as a valid test.
+    if len(result) < MIN_BACKTEST_POINTS:
+        bac_log_kv(
+            "forecast.backtest_forecast_model",
+            message="Discarded backtest because too few predictions were realized.",
+            realized_points=len(result),
+            minimum_points=MIN_BACKTEST_POINTS,
+        )
+        return pd.DataFrame()
+
     bac_log_kv("forecast.backtest_forecast_model", result_rows=len(result))
+    return result.reset_index(drop=True)
+
+
+def add_forecast_intervals(
+    forecast: pd.DataFrame,
+    backtest: pd.DataFrame,
+    last_close: float,
+) -> pd.DataFrame:
+    """Add residual-calibrated 50% and 80% price bands to a forward curve."""
+    result = forecast.copy()
+    required = {"projection_point", "pred_return"}
+    if (
+        result.empty
+        or backtest.empty
+        or not required.issubset(result.columns)
+        or "return_residual" not in backtest.columns
+        or len(backtest) < MIN_BACKTEST_POINTS
+        or last_close <= 0
+    ):
+        bac_log_kv(
+            "forecast.add_forecast_intervals",
+            status="unavailable",
+            forecast_rows=len(result),
+            backtest_rows=len(backtest),
+        )
+        return result
+
+    residuals = pd.to_numeric(backtest["return_residual"], errors="coerce").dropna()
+    if len(residuals) < MIN_BACKTEST_POINTS:
+        return result
+    q10, q25, q75, q90 = np.quantile(residuals, [0.10, 0.25, 0.75, 0.90])
+    maximum_horizon = max(float(result["projection_point"].max()), 1.0)
+    predicted_log_return = np.log1p(result["pred_return"].astype(float))
+    horizon_scale = np.sqrt(result["projection_point"].astype(float) / maximum_horizon)
+
+    for column, residual_quantile in {
+        "lower_80": q10,
+        "lower_50": q25,
+        "upper_50": q75,
+        "upper_80": q90,
+    }.items():
+        result[column] = last_close * np.exp(
+            predicted_log_return + residual_quantile * horizon_scale
+        )
+    bac_log_kv(
+        "forecast.add_forecast_intervals",
+        status="calibrated",
+        residual_rows=len(residuals),
+        forecast_rows=len(result),
+        residual_q10=float(q10),
+        residual_q90=float(q90),
+    )
     return result
 
 
@@ -546,9 +722,77 @@ def summarize_model_comparison(
         "Sentiment MAE lift vs. price-only": np.nan,
     }
     if sentiment_backtest.empty:
+        bac_log_kv(
+            "forecast.summarize_model_comparison",
+            ticker=ticker,
+            status="sentiment_backtest_empty",
+        )
         return comparison
 
-    sentiment_summary = summarize_backtest(ticker, sentiment_backtest, forecast_horizon)
+    # Compare identical forecast origins only.  Without this inner join, a short
+    # and unusually easy sentiment sample could be compared with a much longer,
+    # harder price-only sample and be promoted for the wrong reason.
+    comparison_columns = [
+        "date",
+        "actual_close",
+        "predicted_close",
+        "baseline_close",
+        "absolute_error",
+        "baseline_absolute_error",
+        "direction_correct",
+    ]
+    if not set(comparison_columns).issubset(price_backtest.columns) or not set(
+        comparison_columns
+    ).issubset(sentiment_backtest.columns):
+        bac_log_kv(
+            "forecast.summarize_model_comparison",
+            ticker=ticker,
+            status="missing_comparison_columns",
+        )
+        return comparison
+
+    paired = price_backtest.loc[:, comparison_columns].merge(
+        sentiment_backtest.loc[:, comparison_columns],
+        on="date",
+        how="inner",
+        suffixes=("_price", "_sentiment"),
+        validate="one_to_one",
+    )
+    paired = paired.sort_values("date").drop_duplicates("date", keep="last")
+    bac_log_kv(
+        "forecast.summarize_model_comparison",
+        ticker=ticker,
+        price_rows=len(price_backtest),
+        sentiment_rows=len(sentiment_backtest),
+        paired_rows=len(paired),
+        minimum_paired_rows=MIN_BACKTEST_POINTS,
+    )
+    if len(paired) < MIN_BACKTEST_POINTS:
+        comparison["Sentiment status"] = (
+            f"Collecting paired history ({len(paired)}/{MIN_BACKTEST_POINTS})"
+        )
+        return comparison
+
+    def _paired_model_frame(model_suffix: str) -> pd.DataFrame:
+        """Restore one model's columns after the paired-date inner join."""
+        return pd.DataFrame(
+            {
+                "date": paired["date"],
+                "actual_close": paired[f"actual_close_{model_suffix}"],
+                "predicted_close": paired[f"predicted_close_{model_suffix}"],
+                "baseline_close": paired[f"baseline_close_{model_suffix}"],
+                "absolute_error": paired[f"absolute_error_{model_suffix}"],
+                "baseline_absolute_error": paired[
+                    f"baseline_absolute_error_{model_suffix}"
+                ],
+                "direction_correct": paired[f"direction_correct_{model_suffix}"],
+            }
+        )
+
+    paired_price = _paired_model_frame("price")
+    paired_sentiment = _paired_model_frame("sentiment")
+    price_summary = summarize_backtest(ticker, paired_price, forecast_horizon)
+    sentiment_summary = summarize_backtest(ticker, paired_sentiment, forecast_horizon)
     price_mae = float(price_summary["Model MAE"])
     sentiment_mae = float(sentiment_summary["Model MAE"])
     lift = ((price_mae - sentiment_mae) / price_mae) * 100 if price_mae > 0 else np.nan
@@ -564,9 +808,49 @@ def summarize_model_comparison(
             "Sentiment MAE": sentiment_mae,
             "Sentiment directional accuracy": sentiment_summary["Directional accuracy"],
             "Sentiment MAE lift vs. price-only": lift,
+            "Paired forecasts": len(paired),
         }
     )
+    bac_log_kv(
+        "forecast.summarize_model_comparison",
+        ticker=ticker,
+        active_model=comparison["Active model"],
+        sentiment_mae_lift=lift,
+        paired_forecasts=len(paired),
+    )
     return comparison
+
+
+def _fallback_intraday_projection_dates(
+    last_timestamp: pd.Timestamp,
+    points_ahead: int,
+    frequency: str,
+    market_calendar: str,
+) -> pd.DatetimeIndex:
+    """Keep degraded-mode intraday timestamps inside weekday session hours."""
+    open_text, close_text = FALLBACK_MARKET_SESSION_HOURS.get(
+        market_calendar,
+        FALLBACK_MARKET_SESSION_HOURS["NYSE"],
+    )
+    step = pd.Timedelta(frequency)
+    cursor = last_timestamp
+    future_dates: list[pd.Timestamp] = []
+
+    # This loop is intentionally explicit: it is used only when the calendar
+    # package is unavailable and makes overnight/weekend behavior predictable.
+    while len(future_dates) < points_ahead:
+        cursor += step
+        day = cursor.normalize()
+        session_open = day + pd.Timedelta(open_text + ":00")
+        session_close = day + pd.Timedelta(close_text + ":00")
+        if cursor.dayofweek >= 5 or cursor > session_close:
+            next_day = day + pd.offsets.BDay(1)
+            cursor = pd.Timestamp(next_day) + pd.Timedelta(open_text + ":00")
+        elif cursor < session_open:
+            cursor = session_open
+        future_dates.append(cursor)
+
+    return pd.DatetimeIndex(future_dates)
 
 
 def future_projection_dates(
@@ -574,6 +858,7 @@ def future_projection_dates(
     points_ahead: int,
     realtime_mode: bool,
     interval: str,
+    market_calendar: str = "NYSE",
 ) -> pd.DatetimeIndex:
     """Generate future timestamps that line up with the selected operating mode."""
     bac_log_kv(
@@ -582,30 +867,96 @@ def future_projection_dates(
         points_ahead=points_ahead,
         realtime_mode=realtime_mode,
         interval=interval,
+        market_calendar=market_calendar,
     )
 
     last_timestamp = pd.Timestamp(last_date)
+    if points_ahead < 1:
+        return pd.DatetimeIndex([])
+
+    # The package is deliberately optional at import time so a damaged local
+    # environment still opens the app with a clearly logged degraded schedule.
+    if market_calendars is None:
+        bac_log_kv(
+            "forecast.future_projection_dates",
+            message="Calendar package unavailable; using weekday fallback.",
+            market_calendar=market_calendar,
+        )
+        if realtime_mode:
+            frequency = INTRADAY_FREQUENCIES[interval]
+            return _fallback_intraday_projection_dates(
+                last_timestamp,
+                points_ahead,
+                frequency,
+                market_calendar,
+            )
+        return pd.bdate_range(
+            start=last_timestamp.normalize() + pd.offsets.BDay(1),
+            periods=points_ahead,
+        )
+
+    try:
+        calendar = market_calendars.get_calendar(market_calendar)
+        # A generous end buffer covers weekends, clusters of exchange holidays,
+        # and intraday forecasts that need to flow into later sessions.
+        schedule_start = last_timestamp.normalize()
+        schedule_end = schedule_start + pd.Timedelta(days=max(21, points_ahead * 3))
+        schedule = calendar.schedule(start_date=schedule_start, end_date=schedule_end)
+    except Exception as ex:
+        bac_log_kv(
+            "forecast.future_projection_dates",
+            calendar_error=str(ex),
+            market_calendar=market_calendar,
+        )
+        if realtime_mode:
+            return _fallback_intraday_projection_dates(
+                last_timestamp,
+                points_ahead,
+                INTRADAY_FREQUENCIES[interval],
+                market_calendar,
+            )
+        return pd.bdate_range(
+            start=last_timestamp.normalize() + pd.offsets.BDay(1),
+            periods=points_ahead,
+        )
+
     if realtime_mode:
         frequency = INTRADAY_FREQUENCIES[interval]
+        # yfinance timestamps are stored as naive exchange-local time by this
+        # app.  Convert the calendar output to the same representation before
+        # placing it on the existing Plotly axis.
+        calendar_timezone = calendar.tz
+        localized_last = (
+            last_timestamp.tz_localize(calendar_timezone)
+            if last_timestamp.tzinfo is None
+            else last_timestamp.tz_convert(calendar_timezone)
+        )
+        calendar_bars = market_calendars.date_range(
+            schedule,
+            frequency=frequency,
+            closed="right",
+            force_close=True,
+            session="RTH",
+        ).tz_convert(calendar_timezone)
+        future_dates = calendar_bars[calendar_bars > localized_last][:points_ahead]
+        future_dates = future_dates.tz_localize(None)
         bac_log_kv(
             "forecast.future_projection_dates",
-            projection_mode="intraday",
+            projection_mode="exchange_intraday",
             frequency=frequency,
-        )
-        future_dates = pd.date_range(
-            start=last_timestamp + pd.Timedelta(frequency),
-            periods=points_ahead,
-            freq=frequency,
+            generated_points=len(future_dates),
         )
     else:
+        # Daily charts use session dates rather than UTC close timestamps.  The
+        # schedule index already excludes weekends, full holidays, and closures.
+        session_dates = pd.DatetimeIndex(schedule.index).tz_localize(None)
+        future_dates = session_dates[session_dates > last_timestamp.normalize()][
+            :points_ahead
+        ]
         bac_log_kv(
             "forecast.future_projection_dates",
-            projection_mode="business_days",
-            frequency="B",
-        )
-        future_dates = pd.bdate_range(
-            start=last_timestamp + pd.offsets.BDay(1),
-            periods=points_ahead,
+            projection_mode="exchange_sessions",
+            generated_points=len(future_dates),
         )
 
     bac_log_kv("forecast.future_projection_dates", generated_points=len(future_dates))

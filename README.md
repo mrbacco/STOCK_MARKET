@@ -10,16 +10,16 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 ## Project Goals
 
-- Detect and chart the ten strongest daily leaders for each automatic market source.
+- Evaluate a broad market candidate pool and chart the ten strongest forward predictions automatically.
 - Collect current investing-related news headlines.
 - Score headline sentiment to estimate short-term market mood.
 - Visualize momentum and trend projections for top performers.
 - Provide a manual-refresh real-time workflow for intraday monitoring.
 
-## Current v1 Features
+## Current Features
 
 - Public price data via Yahoo Finance.
-- Automatic top-10 daily performer detection for tracked Ireland, Italy, and U.S. market sources.
+- Automatic market-wide top-10 prediction ranking for tracked Ireland, Italy, and U.S. sources.
 - Ireland ranking from a tracked ISEQ 20 Euronext Dublin universe.
 - Italy ranking across 39 Yahoo-supported FTSE MIB constituents.
 - U.S. large-cap daily-gainers ranking through Yahoo Finance.
@@ -30,7 +30,11 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - News aggregation from Google News RSS.
 - Finance-specific FinBERT sentiment scoring with an automatic VADER fallback.
 - Five-minute background collection with deduplicated SQLite history.
-- Point-in-time 24-hour sentiment features and price-only versus sentiment model comparison.
+- Point-in-time sentiment with exchange-close cutoffs, recency decay, source quality, relevance, novelty, event intensity, negative share, and volume shocks.
+- A pooled Ridge, Elastic Net, and histogram-gradient-boosting ensemble with market context, relative strength, beta, breadth, volatility, and liquidity features.
+- Horizon-embargoed tuning/evaluation periods, paired sentiment promotion, calibrated outperformance probability, model agreement, and abstention signals.
+- Forecast 50% and 80% uncertainty intervals plus exchange-aware future sessions and intraday bars.
+- Persistent production monitoring for rolling MAE, return MAE, directional accuracy, interval coverage, volatility regime, and model-run drift.
 - Top grower ranking using recent performance.
 - Interactive charts for close price and feature-based forecasts.
 - Walk-forward backtests for the trend projection, including error and baseline metrics.
@@ -42,7 +46,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Market data: yfinance.
 - News feed parsing: feedparser.
 - Data processing: pandas and numpy.
-- Forecast model: scikit-learn Ridge regression on technical and lagged sentiment features.
+- Forecast models: a ticker-level Ridge curve plus a market-wide scikit-learn ensemble (Ridge, Elastic Net, histogram gradient boosting, and logistic direction classifier).
+- Exchange sessions: pandas-market-calendars for holidays, early closes, and regular intraday hours.
 - Visualization: Plotly.
 - Sentiment analysis: ProsusAI FinBERT through Transformers, with vaderSentiment fallback.
 - Sentiment persistence: SQLite in the ignored `data/` directory.
@@ -55,6 +60,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - ticker_catalog.py: Geographical market presets, ticker examples, suffix rules, and currency labels.
 - market_data.py: Price, screener, news, and sentiment data loading.
 - forecasting.py: Feature engineering, forecasts, and walk-forward backtests.
+- market_model.py: Pooled contextual ensemble, probabilities, intervals, and automatic top-10 ranking.
+- model_monitoring.py: Persistent forecast outcomes, rolling production metrics, and drift snapshots.
 - sentiment_analysis.py: Cached FinBERT scoring and VADER fallback.
 - sentiment_features.py: Leakage-safe, point-in-time sentiment aggregates.
 - sentiment_service.py: RSS ingestion and the in-process background collector.
@@ -64,6 +71,10 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
 - tests/test_market_leader_rankings.py: Offline ranking and ten-ticker-cap tests for automatic market sources.
 - tests/test_sentiment_pipeline.py: Offline persistence, leakage, feature, and promotion tests.
+- tests/test_market_model.py: Pooled ensemble, probability, interval, and embargo tests.
+- tests/test_forecast_calendar.py: Exchange-session and holiday projection tests.
+- tests/test_model_monitoring.py: Forecast-resolution and drift-monitoring tests.
+- tests/test_prediction_ranking_ui.py: Offline Streamlit proof that the model-ranked top ten charts render automatically.
 - requirements.txt: Python dependencies.
 - README.md: Project documentation.
 - LICENSE: MIT license.
@@ -125,21 +136,24 @@ bounded watchlist most recently registered by the app.
 
 ## Forecasting Approach
 
-The dashboard uses a feature-based regression model that estimates future returns from recent
-momentum, volatility, RSI, price structure, volume behavior, and optional point-in-time sentiment.
-The initial sentiment experiment is deliberately limited to daily forecasts of one to five
-business sessions.
+The dashboard uses two complementary layers. A market-wide ensemble estimates each candidate's
+future return relative to the selected market and chooses the top ten automatically. A
+ticker-level curve then estimates the future close for each displayed stock. Inputs include
+momentum, volatility, RSI, price structure, volume, market breadth, relative strength, beta,
+liquidity, and point-in-time financial-news sentiment. Daily forecasts are designed for short
+horizons of one to five exchange sessions.
 
 - It is directional, not predictive in a guaranteed sense.
 - It works best as a short-horizon market context tool.
 - It should not be used as a sole decision engine for investing.
 
-The dashboard reports a walk-forward backtest for each displayed ticker. It evaluates the same
-user-selected forecast horizon using only the preceding 120 observations. The price-plus-sentiment
-candidate is evaluated against the otherwise identical price-only model and is promoted only when
-its recent walk-forward MAE is lower. It also remains unavailable until at least ten historical
-price bars have observable news. Model MAE, MAPE, directional accuracy, and baseline comparisons
-do not guarantee future returns.
+The dashboard reports walk-forward tests at the selected horizon. Ensemble weights are learned on
+an earlier tuning window and measured on a later untouched evaluation window, with a full
+forecast-horizon gap between partitions. Sentiment can replace the ticker-level price model only
+after at least 20 identical forecast dates are paired and sentiment lowers MAE. Production
+forecasts are frozen locally, resolved after their target session, and summarized separately from
+historical validation. Model MAE, MAPE, direction, probability, interval coverage, and baseline
+comparisons do not guarantee future returns.
 
 ## Data Sources
 
@@ -177,10 +191,9 @@ It is not financial advice, trading advice, or portfolio management advice.
 
 ## Roadmap Ideas
 
-- Backtesting and model error metrics.
-- Advanced indicators such as RSI, MACD, and Bollinger Bands.
-- Portfolio risk scoring and drawdown analytics.
-- Historical-news provider integration for a longer sentiment baseline immediately after setup.
+- Licensed historical-news and historical-index-membership data to remove the remaining cold-start and survivorship limitations.
+- Sector classifications and macro features such as rates, FX, and index futures.
+- Portfolio-level risk, transaction-cost, and drawdown simulation.
 
 ## Author
 
