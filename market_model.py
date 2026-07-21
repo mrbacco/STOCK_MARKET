@@ -42,6 +42,14 @@ from app_config import (
     resolve_market_calendar,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from cache_control import (
+    SharedCacheMiss,
+    current_cache_scope,
+    enqueue_analytics_job,
+    get_cache_generation,
+    shared_cache_get_or_compute,
+)
+from runtime_config import ANALYTICS_READ_ONLY
 from forecasting import build_feature_frame, prepare_model_history
 
 
@@ -440,8 +448,7 @@ def _fit_probability_pipeline(
         return default_evaluation, default_latest, np.nan
 
 
-@st.cache_data(ttl="15m", max_entries=12)
-def rank_market_candidates(
+def _compute_rank_market_candidates(
     price_data: Mapping[str, pd.DataFrame],
     forecast_horizon: int,
     sentiment_by_ticker: Mapping[str, pd.DataFrame] | None = None,
@@ -640,3 +647,59 @@ def rank_market_candidates(
         "selection_backtest": selection_by_date.reset_index(),
         "diagnostics": diagnostics,
     }
+
+
+@st.cache_data(ttl="15m", max_entries=24)
+def _rank_market_candidates_cached(
+    price_data: Mapping[str, pd.DataFrame],
+    forecast_horizon: int,
+    sentiment_by_ticker: Mapping[str, pd.DataFrame] | None,
+    top_n: int,
+    cache_generation: int,
+) -> dict[str, object]:
+    """Use process and Redis cache layers around the pooled model fitting path."""
+    return shared_cache_get_or_compute(
+        "market-ranking",
+        (
+            price_data,
+            forecast_horizon,
+            sentiment_by_ticker,
+            top_n,
+            cache_generation,
+        ),
+        900,
+        lambda: _compute_rank_market_candidates(
+            price_data,
+            forecast_horizon,
+            sentiment_by_ticker,
+            top_n,
+        ),
+        allow_compute=not ANALYTICS_READ_ONLY,
+    )
+
+
+def rank_market_candidates(
+    price_data: Mapping[str, pd.DataFrame],
+    forecast_horizon: int,
+    sentiment_by_ticker: Mapping[str, pd.DataFrame] | None = None,
+    top_n: int = 10,
+) -> dict[str, object]:
+    """Read worker-precomputed ranking results or compute them in local mode."""
+    generation = get_cache_generation(f"model:{current_cache_scope()}")
+    try:
+        return _rank_market_candidates_cached(
+            price_data,
+            forecast_horizon,
+            sentiment_by_ticker,
+            top_n,
+            generation,
+        )
+    except SharedCacheMiss as ex:
+        scope = current_cache_scope()
+        enqueue_analytics_job(
+            "market-ranking",
+            scope,
+            (price_data, forecast_horizon, sentiment_by_ticker, top_n),
+        )
+        bac_log_kv("market_model.rank_market_candidates", status="worker_queued", error=str(ex))
+        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}

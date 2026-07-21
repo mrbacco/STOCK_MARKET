@@ -29,7 +29,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Historical mode for reliable long-range visualization.
 - News aggregation from Google News RSS.
 - Finance-specific FinBERT sentiment scoring with an automatic VADER fallback.
-- Five-minute background collection with deduplicated SQLite history.
+- Five-minute worker collection with deduplicated PostgreSQL or local SQLite history.
 - Point-in-time sentiment with exchange-close cutoffs, recency decay, source quality, relevance, novelty, event intensity, negative share, and volume shocks.
 - A pooled Ridge, Elastic Net, and histogram-gradient-boosting ensemble with market context, relative strength, beta, breadth, volatility, and liquidity features.
 - Horizon-embargoed tuning/evaluation periods, paired sentiment promotion, calibrated outperformance probability, model agreement, and abstention signals.
@@ -50,7 +50,9 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Exchange sessions: pandas-market-calendars for holidays, early closes, and regular intraday hours.
 - Visualization: Plotly.
 - Sentiment analysis: ProsusAI FinBERT through Transformers, with vaderSentiment fallback.
-- Sentiment persistence: SQLite in the ignored `data/` directory.
+- Production persistence: PostgreSQL, with SQLite in `data/` as the zero-configuration local fallback.
+- Shared cache and distributed locks: Redis, with bounded Streamlit process caches as L1.
+- Production processes: stateless Streamlit replicas, one sentiment worker, and one analytics precomputation worker.
 
 ## Repository Structure
 
@@ -65,8 +67,13 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - sentiment_analysis.py: Cached FinBERT scoring and VADER fallback.
 - sentiment_features.py: Leakage-safe, point-in-time sentiment aggregates.
 - sentiment_service.py: RSS ingestion and the in-process background collector.
-- sentiment_store.py: SQLite schema, watchlist, news history, and collector status.
+- database.py: PostgreSQL/SQLite DB-API compatibility layer.
+- cache_control.py: Redis result caching, cache generations, and stampede locks.
+- provider_runtime.py: provider rate limiting, retry/backoff, and circuit breaking.
+- runtime_config.py: environment-backed local and production runtime settings.
+- sentiment_store.py: portable schema, watchlist, news history, and collector status.
 - sentiment_worker.py: Standalone continuous collector for 24/7 operation.
+- analytics_worker.py: Standalone market-ranking and backtest precomputation worker.
 - views.py: Overview, Charts, and News rendering.
 - tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
 - tests/test_market_leader_rankings.py: Offline ranking and ten-ticker-cap tests for automatic market sources.
@@ -113,9 +120,9 @@ The default URL is usually:
 
 - http://localhost:8501
 
-The app starts one background sentiment collector per Streamlit process. It runs every five
-minutes while the app process is alive. To keep collecting when the dashboard is not open, run
-the standalone worker in a continuously supervised terminal or service:
+In zero-configuration local mode, the app starts one background sentiment collector in its
+Streamlit process. For a durable or multi-replica deployment, disable that collector and run the
+standalone worker in a continuously supervised terminal or service:
 
 ```bash
 python sentiment_worker.py
@@ -123,6 +130,33 @@ python sentiment_worker.py
 
 Use `python sentiment_worker.py --once` to test one collection cycle. The worker reads the
 bounded watchlist most recently registered by the app.
+
+### 5. Run the scalable production stack
+
+The included Compose topology starts PostgreSQL, Redis, a dedicated sentiment worker, a dedicated
+analytics worker, Streamlit, and an Nginx reverse proxy with sticky WebSocket routing:
+
+```bash
+copy .env.example .env
+docker compose up --build
+```
+
+Open `http://localhost:8501`. To add web capacity without duplicating collectors or model work:
+
+```bash
+docker compose up --build --scale app=3
+```
+
+Production web replicas set `ANALYTICS_READ_ONLY=true`: rankings, forecast curves, and backtests
+are read from worker-warmed Redis entries. PostgreSQL stores sentiment and monitoring history,
+while Redis also coordinates provider rate limits, targeted refresh generations, and cache-miss
+locks. A period, horizon, or manual portfolio that is not warm yet is placed on a deduplicated
+Redis work queue; the UI remains responsive while `analytics_worker.py` prepares it. The
+`/_stcore/health` endpoint and proxy `/healthz` route are available to orchestrators.
+
+The default worker warms the common `1y` period and `1,3,5` horizons. Override
+`ANALYTICS_PERIODS` or `ANALYTICS_HORIZONS` in `.env` when other combinations should be served
+without synchronous computation.
 
 ## How To Use
 
@@ -164,7 +198,7 @@ comparisons do not guarantee future returns.
 - Manual market catalogue: curated examples for major exchanges, with automatic Yahoo Finance suffix handling for custom symbols.
 - News headlines: Google News RSS ticker queries.
 - Sentiment scoring: FinBERT positive, neutral, and negative probabilities on headline plus summary.
-- Historical sentiment: local SQLite records containing publication, first-seen, and scoring timestamps.
+- Historical sentiment: PostgreSQL in production or local SQLite records, containing publication, first-seen, and scoring timestamps.
 
 ## Reliability Notes
 

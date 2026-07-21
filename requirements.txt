@@ -17,3 +17,8 @@ requests>=2.32.3
 beautifulsoup4>=4.12.3
 transformers>=4.53.0,<6
 torch>=2.7.0
+# Production replicas share durable state through PostgreSQL and cache/model
+# artifacts through Redis. Both clients remain optional at runtime when their
+# corresponding environment URL is absent, preserving the local SQLite path.
+psycopg[binary]>=3.2.0
+redis>=5.0.0

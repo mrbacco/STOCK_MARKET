@@ -1,0 +1,11 @@
+.git
+.agents
+.claude
+.venv
+.venv-runtime
+__pycache__
+*.pyc
+*.log
+data
+.env
+.streamlit/secrets.toml

@@ -6,8 +6,10 @@ __pycache__/
 *.pyc
 .venv/
 .venv-runtime/
-.streamlit/
+# Commit application configuration, but never local credentials.
+.streamlit/secrets.toml
 .agents/
 .claude/
 streamlit-runtime*.log
 data/
+.env

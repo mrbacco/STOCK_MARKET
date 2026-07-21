@@ -34,6 +34,7 @@ from app_config import (
     resolve_price_display,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from cache_control import invalidate_market_scope, set_cache_scope
 from market_data import (
     get_ftse_mib_top_performers,
     get_iseq20_top_performers,
@@ -41,6 +42,7 @@ from market_data import (
 )
 from sentiment_service import ensure_background_sentiment_collector
 from sentiment_store import get_collector_status, update_watchlist
+from runtime_config import RUN_IN_PROCESS_SENTIMENT
 from ticker_catalog import (
     DEFAULT_MANUAL_MARKET,
     format_manual_ticker_option,
@@ -67,10 +69,19 @@ st.caption("Multi-market data, investing news, sentiment trends, and feature-bas
 # leave the app in an invalid branch after a code or widget change.
 initialize_session_defaults(st.session_state)
 initialize_manual_market_state(st.session_state)
-# Start the daemon before any market-data branch can call `st.stop()`.  On a
-# temporary screener failure it can therefore continue collecting the persisted
-# watchlist and feeding future predictions in the background.
-sentiment_collector = ensure_background_sentiment_collector()
+# Local mode starts the daemon before any market-data branch can call `st.stop()`.
+# Production replicas leave this disabled because the supervised worker owns
+# collection independently of browser sessions and web-process restarts.
+sentiment_collector = (
+    ensure_background_sentiment_collector()
+    if RUN_IN_PROCESS_SENTIMENT
+    else None
+)
+bac_log_kv(
+    "app.sentiment_runtime",
+    in_process_collector=RUN_IN_PROCESS_SENTIMENT,
+    worker_mode=not RUN_IN_PROCESS_SENTIMENT,
+)
 bac_log_kv(
     "app.session_defaults",
     active_view=st.session_state.get("active_view"),
@@ -96,6 +107,7 @@ with st.sidebar:
         key="ticker_source",
         width="stretch",
     )
+    cache_scope = str(ticker_source or DEFAULT_TICKER_SOURCE)
     bac_log_kv("app.sidebar", ticker_source=ticker_source)
 
     if ticker_source == MANUAL_SOURCE:
@@ -146,6 +158,20 @@ with st.sidebar:
             "manual_ticker_choices",
             [str(choice) for choice in manual_ticker_choices],
         )
+        # Manual portfolios receive their own generation namespace. Refreshing
+        # one user's selection does not evict analytics for every manual user.
+        normalized_scope_tickers = sorted(
+            str(choice).upper().strip()
+            for choice in manual_ticker_choices
+            if str(choice).strip()
+        )
+        cache_scope = ":".join(
+            [
+                str(ticker_source),
+                manual_market_preset.key,
+                "|".join(normalized_scope_tickers) or "empty",
+            ]
+        )
     elif ticker_source == IRELAND_SOURCE:
         st.caption(
             "Ranks the tracked ISEQ 20 Euronext Dublin listings by their latest available daily close."
@@ -184,11 +210,23 @@ with st.sidebar:
         forecast_points=forecast_points,
     )
 
+    # Period and interval complete the namespace, so refreshing a 1-minute view
+    # does not evict another session's daily or long-history cache entries.
+    cache_scope = f"{cache_scope}:{period}:{interval}"
+
+    # ContextVar state is isolated to this script thread and is inherited by
+    # downstream data/model calls made during the current rerun.
+    set_cache_scope(cache_scope)
+
     if st.button("Refresh now", type="primary"):
-        # Clearing Streamlit's data cache forces all cached loaders in the helper
-        # modules to refresh on the next rerun.
-        bac_log_section("app.sidebar", "Manual refresh requested; clearing st.cache_data.")
-        st.cache_data.clear()
+        refresh_scope = cache_scope
+        market_generation, model_generation = invalidate_market_scope(refresh_scope)
+        bac_log_kv(
+            "app.sidebar.refresh",
+            scope=refresh_scope,
+            market_generation=market_generation,
+            model_generation=model_generation,
+        )
         st.rerun()
 
     active_view = st.segmented_control(
@@ -309,8 +347,13 @@ else:
         "Immediate wake-up unavailable in this runtime.",
     )
 collector_status = get_collector_status()
+collector_mode = (
+    "in-process every 5 minutes"
+    if RUN_IN_PROCESS_SENTIMENT
+    else "dedicated worker"
+)
 st.caption(
-    "Sentiment collector: active every 5 minutes while the app is running · "
+    f"Sentiment collector: {collector_mode} · "
     f"{collector_status.get('article_count', 0)} stored articles · "
     f"{collector_status.get('watchlist_count', 0)} tracked tickers."
 )

@@ -20,6 +20,7 @@ from urllib.parse import quote_plus
 
 import feedparser
 import pandas as pd
+import requests
 import streamlit as st
 
 from app_config import (
@@ -27,6 +28,8 @@ from app_config import (
     SENTIMENT_MAX_NEWS_ITEMS,
 )
 from app_logging import bac_log_kv, bac_log_section
+from provider_runtime import call_provider
+from runtime_config import NEWS_MIN_INTERVAL_SECONDS
 from sentiment_analysis import get_sentiment_analyzer
 from sentiment_store import (
     existing_content_hashes,
@@ -92,7 +95,21 @@ def fetch_news_candidates(
         f"?q={query}&hl={language}&gl={country}&ceid={edition}"
     )
     first_seen = pd.Timestamp.now(tz="UTC")
-    feed = feedparser.parse(url)
+    # Fetch through the shared provider guard rather than letting feedparser
+    # perform an unbounded URL request.  This supplies explicit timeouts,
+    # retry/backoff, rate limiting, and circuit-breaking BAC_LOG events.
+    response = call_provider(
+        "google-news-rss",
+        "headline-search",
+        lambda: requests.get(
+            url,
+            timeout=(3.05, 8),
+            headers={"User-Agent": "stock-market-intelligence/1.0"},
+        ),
+        minimum_interval=NEWS_MIN_INTERVAL_SECONDS,
+    )
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
     candidates: list[dict[str, Any]] = []
 
     for entry in feed.entries[:max_items]:

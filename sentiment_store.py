@@ -8,9 +8,7 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +16,7 @@ import pandas as pd
 
 from app_config import SENTIMENT_MAX_WATCHLIST
 from app_logging import bac_log_kv
+from database import database_connection
 
 DEFAULT_SENTIMENT_DB = Path(__file__).resolve().parent / "data" / "sentiment.db"
 
@@ -28,20 +27,9 @@ def _resolve_db_path(db_path: str | Path | None = None) -> Path:
     return path
 
 
-@contextmanager
 def _connect(db_path: str | Path | None = None):
-    connection = sqlite3.connect(_resolve_db_path(db_path), timeout=30)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA busy_timeout=30000")
-    try:
-        yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
+    """Use PostgreSQL in production and the requested SQLite file in tests/local runs."""
+    return database_connection(DEFAULT_SENTIMENT_DB, db_path)
 
 
 def _utc_iso(value: Any | None = None) -> str:
@@ -56,7 +44,10 @@ def _utc_iso(value: Any | None = None) -> str:
 def initialize_sentiment_store(db_path: str | Path | None = None) -> Path:
     """Create the database and indexes idempotently."""
     path = _resolve_db_path(db_path)
-    with _connect(path) as connection:
+    # Pass through the caller's original override. Resolving the default path
+    # first would make it look explicit and accidentally force SQLite even when
+    # DATABASE_URL selects PostgreSQL for the production process.
+    with _connect(db_path) as connection:
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS news_sentiment (
@@ -299,11 +290,19 @@ def get_collector_status(db_path: str | Path | None = None) -> dict[str, Any]:
         state_rows = connection.execute(
             "SELECT state_key, state_value, updated_at FROM sentiment_collector_state"
         ).fetchall()
-        article_count = int(connection.execute("SELECT COUNT(*) FROM news_sentiment").fetchone()[0])
+        article_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS article_count FROM news_sentiment"
+            ).fetchone()["article_count"]
+        )
         watchlist_count = int(
             connection.execute(
-                "SELECT COUNT(*) FROM sentiment_watchlist WHERE active = 1"
-            ).fetchone()[0]
+                """
+                SELECT COUNT(*) AS watchlist_count
+                FROM sentiment_watchlist
+                WHERE active = 1
+                """
+            ).fetchone()["watchlist_count"]
         )
     status = {str(row["state_key"]): str(row["state_value"]) for row in state_rows}
     status["article_count"] = article_count

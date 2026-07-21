@@ -28,6 +28,13 @@ from app_config import (
     US_SCREENER_QUERY,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from cache_control import (
+    current_cache_scope,
+    get_cache_generation,
+    shared_cache_get_or_compute,
+)
+from provider_runtime import call_provider
+from runtime_config import RUN_IN_PROCESS_SENTIMENT, YAHOO_MIN_INTERVAL_SECONDS
 from sentiment_service import collect_tickers_once
 from sentiment_store import load_sentiment_history
 
@@ -90,7 +97,7 @@ def format_price_history(history: pd.DataFrame) -> pd.DataFrame:
     return formatted
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, max_entries=100)
 def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Fetch history for one ticker.
 
@@ -103,7 +110,16 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> 
         period=period,
         interval=interval,
     )
-    history = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+    history = call_provider(
+        "yahoo-finance",
+        "single-price-history",
+        lambda: yf.Ticker(ticker).history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+        ),
+        minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
+    )
     formatted = format_price_history(history)
     bac_log_kv(
         "market_data.get_price_history",
@@ -113,8 +129,7 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> 
     return formatted
 
 
-@st.cache_data(ttl=30, max_entries=100)
-def get_price_history_batch(
+def _compute_price_history_batch(
     tickers: List[str],
     period: str,
     interval: str,
@@ -133,15 +148,20 @@ def get_price_history_batch(
         return result
 
     try:
-        data = yf.download(
-            tickers=tickers,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            auto_adjust=False,
-            threads=False,
-            progress=False,
-            timeout=4,
+        data = call_provider(
+            "yahoo-finance",
+            "price-history-batch",
+            lambda: yf.download(
+                tickers=tickers,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                auto_adjust=False,
+                threads=False,
+                progress=False,
+                timeout=4,
+            ),
+            minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
         )
     except Exception as ex:
         bac_log_kv("market_data.get_price_history_batch", download_error=str(ex))
@@ -200,14 +220,44 @@ def get_price_history_batch(
     return result
 
 
-@st.cache_data(ttl=60, max_entries=2)
-def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+@st.cache_data(ttl=30, max_entries=100)
+def _get_price_history_batch_cached(
+    tickers: List[str],
+    period: str,
+    interval: str,
+    cache_generation: int,
+) -> dict[str, pd.DataFrame]:
+    """Use Streamlit as L1 and Redis as a cross-replica L2 data cache."""
+    return shared_cache_get_or_compute(
+        "price-history-batch",
+        (tuple(tickers), period, interval, cache_generation),
+        30,
+        lambda: _compute_price_history_batch(tickers, period, interval),
+    )
+
+
+def get_price_history_batch(
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> dict[str, pd.DataFrame]:
+    """Fetch histories with targeted generation invalidation for this market."""
+    generation = get_cache_generation(f"market:{current_cache_scope()}")
+    return _get_price_history_batch_cached(tickers, period, interval, generation)
+
+
+def _compute_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
     """Load the Yahoo Finance U.S. daily gainers screener and keep top equities."""
     bac_log_kv("market_data.get_us_top_performers", limit=limit)
     columns = ["Ticker", "Company", "Daily change", "Last price"]
 
     try:
-        response = yf.screen(US_SCREENER_QUERY, count=max(limit * 3, 30))
+        response = call_provider(
+            "yahoo-finance",
+            "us-equity-screener",
+            lambda: yf.screen(US_SCREENER_QUERY, count=max(limit * 3, 30)),
+            minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
+        )
     except Exception as ex:
         bac_log_kv("market_data.get_us_top_performers", screener_error=str(ex))
         return pd.DataFrame(columns=columns)
@@ -271,6 +321,21 @@ def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame
     )
     bac_log_kv("market_data.get_us_top_performers", result_rows=len(result))
     return result
+
+
+@st.cache_data(ttl=60, max_entries=8)
+def _get_us_top_performers_cached(limit: int, cache_generation: int) -> pd.DataFrame:
+    return shared_cache_get_or_compute(
+        "us-top-performers",
+        (limit, cache_generation),
+        60,
+        lambda: _compute_us_top_performers(limit),
+    )
+
+
+def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+    generation = get_cache_generation(f"market:{current_cache_scope()}")
+    return _get_us_top_performers_cached(limit, generation)
 
 
 def _rank_latest_daily_performers(
@@ -345,8 +410,8 @@ def _rank_latest_daily_performers(
     return result
 
 
-@st.cache_data(ttl=300, max_entries=2)
-def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+@st.cache_data(ttl=300, max_entries=8)
+def _get_iseq20_top_performers_cached(limit: int, cache_generation: int) -> pd.DataFrame:
     """Rank the fixed Ireland universe by the latest daily change."""
     return _rank_latest_daily_performers(
         ISEQ_20_DUBLIN_LISTINGS,
@@ -355,14 +420,24 @@ def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataF
     )
 
 
-@st.cache_data(ttl=300, max_entries=2)
-def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+    generation = get_cache_generation(f"market:{current_cache_scope()}")
+    return _get_iseq20_top_performers_cached(limit, generation)
+
+
+@st.cache_data(ttl=300, max_entries=8)
+def _get_ftse_mib_top_performers_cached(limit: int, cache_generation: int) -> pd.DataFrame:
     """Rank Yahoo-supported FTSE MIB constituents by latest daily change."""
     return _rank_latest_daily_performers(
         FTSE_MIB_MILAN_LISTINGS,
         limit,
         "market_data.get_ftse_mib_top_performers",
     )
+
+
+def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
+    generation = get_cache_generation(f"market:{current_cache_scope()}")
+    return _get_ftse_mib_top_performers_cached(limit, generation)
 
 
 @st.cache_data(ttl=60, max_entries=200)
@@ -374,7 +449,11 @@ def get_news(ticker: str, company_name: str = "", max_items: int = 20) -> pd.Dat
         company_name=company_name,
         max_items=max_items,
     )
-    collect_tickers_once({ticker: company_name or ticker})
+    # Production web replicas only read the shared store.  The dedicated worker
+    # owns network collection and FinBERT inference, preventing one RSS request
+    # per user/session.  Local mode preserves the convenient on-demand behavior.
+    if RUN_IN_PROCESS_SENTIMENT:
+        collect_tickers_once({ticker: company_name or ticker})
     result = load_sentiment_history(ticker, limit=max_items)
     if result.empty:
         bac_log_kv("market_data.get_news", ticker=ticker, result_rows=0)

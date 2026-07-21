@@ -9,9 +9,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Mapping
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from app_logging import bac_log_kv, bac_log_section
+from database import database_connection
 
 
 DEFAULT_MONITORING_DB = Path(__file__).resolve().parent / "data" / "model_monitoring.db"
@@ -30,20 +29,9 @@ def _resolve_db_path(db_path: str | Path | None = None) -> Path:
     return path
 
 
-@contextmanager
 def _connect(db_path: str | Path | None = None):
-    connection = sqlite3.connect(_resolve_db_path(db_path), timeout=30)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA busy_timeout=30000")
-    try:
-        yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
+    """Open the shared PostgreSQL store or a local/test SQLite database."""
+    return database_connection(DEFAULT_MONITORING_DB, db_path)
 
 
 def _utc_iso(value: object | None = None) -> str:
@@ -65,7 +53,9 @@ def _naive_timestamp_text(value: object) -> str:
 def initialize_monitoring_store(db_path: str | Path | None = None) -> Path:
     """Create forecast and model-run tables idempotently."""
     path = _resolve_db_path(db_path)
-    with _connect(path) as connection:
+    # Keep `None` intact so database_connection can honor DATABASE_URL. Explicit
+    # paths still select isolated SQLite files for tests and local utilities.
+    with _connect(db_path) as connection:
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS forecast_observations (

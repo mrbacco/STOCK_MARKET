@@ -1,0 +1,61 @@
+[server]
+# Safe defaults for the included container and reverse proxy deployment.
+headless = true
+address = "0.0.0.0"
+port = 8501
+enableXsrfProtection = true
+enableCORS = true
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#4f4f52"
+backgroundColor = "#f5f5f3"
+secondaryBackgroundColor = "#ecebe8"
+textColor = "#1f1f20"
+linkColor = "#5a5a5e"
+codeTextColor = "#1f1f20"
+codeBackgroundColor = "#e6e5e2"
+borderColor = "#d4d2cd"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "small"
+buttonRadius = "small"
+
+# Use Aptos Narrow when the local environment has it available. If a given
+# runtime does not have Aptos installed, Streamlit will fall back to its normal
+# sans-serif handling rather than breaking the app.
+font = "Aptos Narrow"
+headingFont = "Aptos Narrow"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 14
+baseFontWeight = 400
+codeFontSize = "0.84rem"
+headingFontSizes = ["30px", "22px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [600, 600, 600, 500, 500, 500]
+linkUnderline = false
+
+grayColor = "#6b6b70"
+blueColor = "#777b80"
+greenColor = "#7d8478"
+orangeColor = "#98907f"
+redColor = "#8b7474"
+violetColor = "#7a7a82"
+yellowColor = "#a39c86"
+
+chartCategoricalColors = ["#3b3b3f", "#57575c", "#73737a", "#8f9098", "#ababaf", "#c3c3c6", "#6c747b"]
+chartSequentialColors = ["#f5f5f3", "#ecebe8", "#e1dfdb", "#d4d2cd", "#c3c0ba", "#aeaba4", "#97948d", "#7f7c76", "#65625e", "#4b4946"]
+
+dataframeBorderColor = "#d4d2cd"
+dataframeHeaderBackgroundColor = "#e6e5e2"
+
+[theme.sidebar]
+backgroundColor = "#efeeeb"
+secondaryBackgroundColor = "#e3e1dc"
+codeBackgroundColor = "#e3e1dc"
+textColor = "#262628"
+borderColor = "#d4d2cd"
+primaryColor = "#555559"

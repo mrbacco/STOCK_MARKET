@@ -34,6 +34,14 @@ from app_config import (
     SENTIMENT_FEATURE_COLUMNS,
 )
 from app_logging import bac_log_kv, bac_log_section
+from cache_control import (
+    SharedCacheMiss,
+    current_cache_scope,
+    enqueue_analytics_job,
+    get_cache_generation,
+    shared_cache_get_or_compute,
+)
+from runtime_config import ANALYTICS_READ_ONLY
 from sentiment_features import build_sentiment_feature_frame, has_sufficient_sentiment_history
 
 try:
@@ -374,8 +382,7 @@ def predict_horizon_close(
     }
 
 
-@st.cache_data(ttl="5m", max_entries=100)
-def forecast_feature_model(
+def _compute_forecast_feature_model(
     price_history: pd.DataFrame,
     points_ahead: int = 30,
     sentiment_history: pd.DataFrame | None = None,
@@ -448,7 +455,72 @@ def forecast_feature_model(
 
 
 @st.cache_data(ttl="5m", max_entries=100)
-def backtest_forecast_model(
+def _forecast_feature_model_cached(
+    price_history: pd.DataFrame,
+    points_ahead: int,
+    sentiment_history: pd.DataFrame | None,
+    include_sentiment: bool,
+    market_calendar: str,
+    cache_generation: int,
+) -> pd.DataFrame:
+    return shared_cache_get_or_compute(
+        "forecast-curve",
+        (
+            price_history,
+            points_ahead,
+            sentiment_history,
+            include_sentiment,
+            market_calendar,
+            cache_generation,
+        ),
+        300,
+        lambda: _compute_forecast_feature_model(
+            price_history,
+            points_ahead,
+            sentiment_history,
+            include_sentiment,
+            market_calendar,
+        ),
+        allow_compute=not ANALYTICS_READ_ONLY,
+    )
+
+
+def forecast_feature_model(
+    price_history: pd.DataFrame,
+    points_ahead: int = 30,
+    sentiment_history: pd.DataFrame | None = None,
+    include_sentiment: bool = False,
+    market_calendar: str = "NYSE",
+) -> pd.DataFrame:
+    """Read a worker-warmed forecast or compute it in local development mode."""
+    generation = get_cache_generation(f"model:{current_cache_scope()}")
+    try:
+        return _forecast_feature_model_cached(
+            price_history,
+            points_ahead,
+            sentiment_history,
+            include_sentiment,
+            market_calendar,
+            generation,
+        )
+    except SharedCacheMiss as ex:
+        scope = current_cache_scope()
+        enqueue_analytics_job(
+            "forecast-curve",
+            scope,
+            (
+                price_history,
+                points_ahead,
+                sentiment_history,
+                include_sentiment,
+                market_calendar,
+            ),
+        )
+        bac_log_kv("forecast.forecast_feature_model", status="worker_queued", error=str(ex))
+        return pd.DataFrame()
+
+
+def _compute_backtest_forecast_model(
     price_history: pd.DataFrame,
     forecast_horizon: int,
     training_points: int = BACKTEST_TRAINING_POINTS,
@@ -577,6 +649,84 @@ def backtest_forecast_model(
 
     bac_log_kv("forecast.backtest_forecast_model", result_rows=len(result))
     return result.reset_index(drop=True)
+
+
+@st.cache_data(ttl="5m", max_entries=100)
+def _backtest_forecast_model_cached(
+    price_history: pd.DataFrame,
+    forecast_horizon: int,
+    training_points: int,
+    max_test_points: int,
+    sentiment_history: pd.DataFrame | None,
+    include_sentiment: bool,
+    market_calendar: str,
+    cache_generation: int,
+) -> pd.DataFrame:
+    return shared_cache_get_or_compute(
+        "forecast-backtest",
+        (
+            price_history,
+            forecast_horizon,
+            training_points,
+            max_test_points,
+            sentiment_history,
+            include_sentiment,
+            market_calendar,
+            cache_generation,
+        ),
+        300,
+        lambda: _compute_backtest_forecast_model(
+            price_history,
+            forecast_horizon,
+            training_points,
+            max_test_points,
+            sentiment_history,
+            include_sentiment,
+            market_calendar,
+        ),
+        allow_compute=not ANALYTICS_READ_ONLY,
+    )
+
+
+def backtest_forecast_model(
+    price_history: pd.DataFrame,
+    forecast_horizon: int,
+    training_points: int = BACKTEST_TRAINING_POINTS,
+    max_test_points: int = MAX_BACKTEST_POINTS,
+    sentiment_history: pd.DataFrame | None = None,
+    include_sentiment: bool = False,
+    market_calendar: str = "NYSE",
+) -> pd.DataFrame:
+    """Read a worker-warmed walk-forward test or compute it in local mode."""
+    generation = get_cache_generation(f"model:{current_cache_scope()}")
+    try:
+        return _backtest_forecast_model_cached(
+            price_history,
+            forecast_horizon,
+            training_points,
+            max_test_points,
+            sentiment_history,
+            include_sentiment,
+            market_calendar,
+            generation,
+        )
+    except SharedCacheMiss as ex:
+        scope = current_cache_scope()
+        enqueue_analytics_job(
+            "forecast-backtest",
+            scope,
+            (
+                price_history,
+                forecast_horizon,
+                training_points,
+                max_test_points,
+                sentiment_history,
+                include_sentiment,
+                market_calendar,
+            ),
+        )
+        bac_log_kv("forecast.backtest_forecast_model", status="worker_queued", error=str(ex))
+        return pd.DataFrame()
 
 
 def add_forecast_intervals(

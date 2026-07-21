@@ -56,6 +56,7 @@ from model_monitoring import (
     resolve_pending_forecasts,
 )
 from sentiment_store import load_sentiment_history
+from runtime_config import ANALYTICS_READ_ONLY
 
 
 def _volatility_regime(price_history: pd.DataFrame) -> str:
@@ -357,9 +358,22 @@ def render_charts_view(
                 f"{leader_change:.2f}%" if pd.notna(leader_change) else "Unavailable"
             )
             if automatic_daily_ranking:
-                st.warning(
-                    "The market-wide model does not yet have enough embargoed history; using the current daily ordering temporarily."
-                )
+                if ANALYTICS_READ_ONLY:
+                    st.info(
+                        "The analytics worker is preparing this market, period, and horizon. "
+                        "Showing the current daily ordering until its shared result is ready."
+                    )
+                    bac_log_kv(
+                        "views.render_charts_view",
+                        status="analytics_worker_pending",
+                        ticker_source=ticker_source,
+                        period=period,
+                        forecast_points=forecast_points,
+                    )
+                else:
+                    st.warning(
+                        "The market-wide model does not yet have enough embargoed history; using the current daily ordering temporarily."
+                    )
         bac_log_kv(
             "views.render_charts_view",
             leader_label=leader_label,
@@ -855,10 +869,16 @@ def render_charts_view(
         )
     else:
         bac_log_section("views.render_charts_view", "No backtest summary rows were available.")
-        st.info(
-            "Not enough price observations to backtest this forecast model. "
-            f"At least {BACKTEST_TRAINING_POINTS + forecast_points + MIN_BACKTEST_POINTS - 1} observations are required."
-        )
+        if ANALYTICS_READ_ONLY:
+            st.info(
+                "Backtests for this selection are not in the shared analytics cache yet. "
+                "The worker will prepare them without blocking this browser session."
+            )
+        else:
+            st.info(
+                "Not enough price observations to backtest this forecast model. "
+                f"At least {BACKTEST_TRAINING_POINTS + forecast_points + MIN_BACKTEST_POINTS - 1} observations are required."
+            )
 
     st.subheader("Production model monitoring")
     st.caption(
