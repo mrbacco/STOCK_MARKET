@@ -15,6 +15,7 @@ import pandas as pd
 import market_data
 import sentiment_service
 import sentiment_store
+import views
 from app_config import FTSE_MIB_SOURCE, MANUAL_SOURCE
 from app_logging import bac_log_kv, bac_log_section
 from streamlit.testing.v1 import AppTest
@@ -62,6 +63,7 @@ class ManualMarketUiTest(unittest.TestCase):
         cls.original_ftse_loader = market_data.get_ftse_mib_top_performers
         cls.original_us_loader = market_data.get_us_top_performers
         cls.original_history_loader = market_data.get_price_history_batch
+        cls.original_views_history_loader = views.get_price_history_batch
         cls.original_background_collector = sentiment_service.ensure_background_sentiment_collector
         cls.original_watchlist_updater = sentiment_store.update_watchlist
         cls.original_collector_status = sentiment_store.get_collector_status
@@ -83,6 +85,10 @@ class ManualMarketUiTest(unittest.TestCase):
                 ticker: _sample_price_frame() for ticker in tickers
             }
         )
+        # views.py imports the loader directly, so patch its bound reference as
+        # well. This keeps fragment/UI tests deterministic regardless of module
+        # import order in the full suite.
+        views.get_price_history_batch = market_data.get_price_history_batch
         sentiment_service.ensure_background_sentiment_collector = lambda: None
         sentiment_store.update_watchlist = lambda company_by_ticker: None
         sentiment_store.get_collector_status = lambda: {
@@ -99,6 +105,7 @@ class ManualMarketUiTest(unittest.TestCase):
         market_data.get_ftse_mib_top_performers = cls.original_ftse_loader
         market_data.get_us_top_performers = cls.original_us_loader
         market_data.get_price_history_batch = cls.original_history_loader
+        views.get_price_history_batch = cls.original_views_history_loader
         sentiment_service.ensure_background_sentiment_collector = cls.original_background_collector
         sentiment_store.update_watchlist = cls.original_watchlist_updater
         sentiment_store.get_collector_status = cls.original_collector_status
@@ -155,6 +162,33 @@ class ManualMarketUiTest(unittest.TestCase):
         active_view.set_value("Charts").run(timeout=60)
         self.assertEqual([], list(app.exception))
         self.assertTrue(any(subheader.value == "Forecast backtest" for subheader in app.subheader))
+
+    def test_realtime_mode_enables_free_live_chart_fragment(self) -> None:
+        """Free polling should be visible and enabled without an API key."""
+        app = AppTest.from_file("app.py")
+        app.run(timeout=60)
+
+        realtime_toggle = next(
+            widget for widget in app.toggle if widget.label == "Real-time Mode"
+        )
+        realtime_toggle.set_value(True).run(timeout=60)
+        live_toggle = next(
+            widget for widget in app.toggle if widget.label == "Live chart updates"
+        )
+        self.assertTrue(live_toggle.value)
+
+        active_view = next(
+            widget for widget in app.segmented_control if widget.label == "View"
+        )
+        active_view.set_value("Charts").run(timeout=60)
+
+        self.assertEqual([], list(app.exception))
+        self.assertTrue(
+            any(
+                "Live updates on" in caption.value
+                for caption in app.caption
+            )
+        )
 
     def test_italy_source_renders_ranked_leader_charts(self) -> None:
         """Italy should use constituent-leader labels instead of the old index view."""

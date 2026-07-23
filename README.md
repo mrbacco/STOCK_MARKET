@@ -43,7 +43,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 ## Architecture
 
 - Frontend and app runtime: Streamlit.
-- Market data: yfinance.
+- Market data: yfinance for local evaluation, with an optional Marketstack EOD
+  adapter for a commercially licensed deployment.
 - News feed parsing: feedparser.
 - Data processing: pandas and numpy.
 - Forecast models: a ticker-level Ridge curve plus a market-wide scikit-learn ensemble (Ridge, Elastic Net, histogram gradient boosting, and logistic direction classifier).
@@ -116,6 +117,17 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+For a lighter Windows laptop run without Docker or the continuous FinBERT
+collector, use:
+
+```powershell
+.\run-local.ps1
+```
+
+Forecasting, SQLite persistence, provider retries, and last-known-good market
+snapshots remain enabled. Existing sentiment history can still be read. Press
+`Ctrl+C` in the PowerShell window to stop the app.
+
 The default URL is usually:
 
 - http://localhost:8501
@@ -164,8 +176,11 @@ without synchronous computation.
 2. Use **View** to select **Overview**, **Charts**, or **News**; select **Charts** to see the price charts and forecast backtests.
 3. The Charts view automatically loads the highest-ranked ten supported tickers for the selected automatic market source.
 4. Select **Manual tickers**, choose a geographical market, and then select example securities or type another Yahoo Finance symbol.
-5. Choose Real-time Mode for intraday tracking, or disable it for historical mode.
-6. Click Refresh now to refresh prices, rankings, and news.
+5. Choose Real-time Mode for intraday tracking. **Live chart updates** then
+   refreshes the Charts view every 60 seconds using free Yahoo polling while
+   the browser tab remains active.
+6. Disable Live chart updates for manual-only operation, or click Refresh now
+   to invalidate prices, rankings, and forecasts immediately.
 7. Monitor terminal logs for BAC_LOG entries.
 
 ## Forecasting Approach
@@ -209,7 +224,14 @@ comparisons do not guarantee future returns.
   a complete ranking of every listed U.S. stock.
 - Intraday values are the latest returned bar closes; their deltas compare consecutive bars, not
   live ticks or daily changes.
-- The app includes fallback behavior and manual refresh flow to reduce lockups.
+- Free live charts poll once per minute; they are not exchange tick streams.
+  Plot zoom and legend choices remain stable across refreshes, while forecast
+  inputs advance only after a five-minute bucket completes to control CPU use.
+- Batch price gaps retry through bounded single-ticker requests. Successful
+  histories are stored as last-known-good snapshots in PostgreSQL or local
+  SQLite and are clearly labelled when used during provider recovery.
+- Severe bar staleness is shown in the Charts data-health strip. Recovery
+  forecasts remain visible but are not recorded as fresh production forecasts.
 - For best responsiveness in real-time mode, track a small number of symbols.
 - Your ability to buy a listed security depends on your broker account, market access, and personal tax circumstances; this app does not determine investment eligibility.
 

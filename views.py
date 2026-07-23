@@ -33,6 +33,7 @@ from app_config import (
     selected_horizon_label,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from cache_control import set_cache_scope
 from forecasting import (
     add_forecast_intervals,
     backtest_forecast_model,
@@ -43,6 +44,7 @@ from forecasting import (
 )
 from market_model import rank_market_candidates
 from market_data import (
+    assess_price_history_freshness,
     get_price_history_batch,
     growth_score,
     load_news_frames_parallel,
@@ -57,7 +59,14 @@ from model_monitoring import (
     resolve_pending_forecasts,
 )
 from sentiment_store import load_sentiment_history
-from runtime_config import ANALYTICS_READ_ONLY
+from runtime_config import ANALYTICS_READ_ONLY, LIVE_CHART_REFRESH_SECONDS
+
+
+# Live prices can change each minute, but refitting and walk-forward testing
+# every model on each poll would create unnecessary CPU load. The model uses
+# only bars before the currently active five-minute bucket; the solid observed
+# line still displays every price bar returned by the provider.
+REALTIME_MODEL_REFRESH_FREQUENCY = "5min"
 
 
 def _volatility_regime(price_history: pd.DataFrame) -> str:
@@ -78,6 +87,61 @@ def _volatility_regime(price_history: pd.DataFrame) -> str:
         regime=regime,
     )
     return regime
+
+
+def prepare_realtime_forecast_history(
+    price_history: pd.DataFrame,
+    *,
+    realtime_mode: bool,
+) -> pd.DataFrame:
+    """Freeze intraday model input within each five-minute refresh bucket.
+
+    A 60-second fragment rerun should redraw new observed prices, but it should
+    not continuously refit the model against a bar that may still be forming.
+    Excluding the latest five-minute bucket gives the forecast a stable origin
+    until the next bucket begins. Daily mode returns the original history
+    unchanged.
+    """
+    if (
+        not realtime_mode
+        or price_history.empty
+        or "Date" not in price_history.columns
+    ):
+        return price_history
+
+    dates = pd.to_datetime(price_history["Date"], errors="coerce")
+    latest_bar = dates.max()
+    if pd.isna(latest_bar):
+        return price_history
+
+    active_bucket_start = latest_bar.floor(REALTIME_MODEL_REFRESH_FREQUENCY)
+    completed_history = price_history.loc[dates < active_bucket_start].copy()
+
+    # Very short market sessions or newly listed symbols may not yet have
+    # enough completed bars. In that case retain the full frame so the existing
+    # readiness diagnostics, rather than this optimization, decide whether a
+    # forecast is possible.
+    if len(completed_history) < 30:
+        completed_history = price_history.copy()
+        status = "full_history_short_fallback"
+    else:
+        status = "completed_bucket"
+
+    completed_history.attrs.update(price_history.attrs)
+    bac_log_kv(
+        "views.realtime_model_input",
+        status=status,
+        live_rows=len(price_history),
+        model_rows=len(completed_history),
+        latest_live_bar=str(latest_bar),
+        latest_model_bar=(
+            str(completed_history["Date"].iloc[-1])
+            if not completed_history.empty
+            else None
+        ),
+        refresh_frequency=REALTIME_MODEL_REFRESH_FREQUENCY,
+    )
+    return completed_history
 
 
 def render_overview_view(
@@ -283,14 +347,91 @@ def render_charts_view(
 
     if not valid_tickers:
         bac_log_section("views.render_charts_view", "No valid chart data was available.")
-        st.error("No price data was returned. Check ticker symbols and try again.")
+        st.error(
+            "No live or last-known-good price history is available. Check ticker "
+            "symbols, provider connectivity, and [BAC_LOG] market-data entries."
+        )
         st.stop()
+
+    freshness_by_ticker = {
+        ticker: assess_price_history_freshness(
+            price_data[ticker],
+            realtime_mode=realtime_mode,
+        )
+        for ticker in valid_tickers
+    }
+    stale_tickers = []
+    for ticker in valid_tickers:
+        provider_status = price_data[ticker].attrs.get("bac_data_status")
+        freshness_status = freshness_by_ticker[ticker]["status"]
+        # Only provider-tagged histories receive wall-clock freshness gating.
+        # Deterministic tests and caller-supplied dataframes intentionally have
+        # no provider metadata and remain usable as explicit offline inputs.
+        if provider_status == "last_known_good" or (
+            provider_status == "live" and freshness_status != "fresh"
+        ):
+            stale_tickers.append(ticker)
+            if provider_status != "last_known_good":
+                price_data[ticker].attrs["bac_data_status"] = "provider_stale"
+    live_tickers = [ticker for ticker in valid_tickers if ticker not in stale_tickers]
+    bac_log_list_preview(
+        "views.render_charts_view.data_health",
+        "live_tickers",
+        live_tickers,
+    )
+    bac_log_list_preview(
+        "views.render_charts_view.data_health",
+        "last_known_good_tickers",
+        stale_tickers,
+    )
+    if stale_tickers:
+        stale_details = ", ".join(
+            (
+                f"{ticker} (latest bar "
+                f"{freshness_by_ticker[ticker].get('latest_bar', 'unknown')}; "
+                f"last fetched "
+                f"{price_data[ticker].attrs.get('bac_fetched_at', 'unknown')})"
+            )
+            for ticker in stale_tickers
+        )
+        st.warning(
+            "Market-data recovery/staleness mode is active. Forecasts remain "
+            f"visible but are not treated as fresh for: {stale_details}."
+        )
+
+    # Keep operational health beside the product output. A paying user should
+    # never have to infer data quality from whether a dashed line appeared.
+    latest_market_bar = max(
+        (
+            diagnosis["latest_bar"]
+            for diagnosis in freshness_by_ticker.values()
+            if diagnosis.get("latest_bar") is not None
+        ),
+        default=None,
+    )
+    data_health_columns = st.columns(4)
+    data_health_columns[0].metric(
+        "Data pipeline",
+        "Healthy" if not stale_tickers else "Recovery mode",
+    )
+    data_health_columns[1].metric("Fresh histories", len(live_tickers))
+    data_health_columns[2].metric("Stale/recovered", len(stale_tickers))
+    data_health_columns[3].metric(
+        "Latest market bar",
+        (
+            pd.Timestamp(latest_market_bar).strftime("%Y-%m-%d %H:%M")
+            if latest_market_bar is not None
+            else "Unavailable"
+        ),
+    )
 
     monitoring_market = str(ticker_source or "Manual tickers")
     # Resolve old forecasts before writing the current run.  Only target bars
-    # already present in the freshly loaded history can close an observation.
+    # already present in freshly fetched history can close an observation.
+    # Stale snapshots are intentionally excluded so an outage cannot create a
+    # misleading resolution event.
     resolved_forecasts = resolve_pending_forecasts(
-        {ticker: price_data[ticker] for ticker in valid_tickers},
+        {ticker: price_data[ticker] for ticker in live_tickers},
         monitoring_market,
     )
     if resolved_forecasts:
@@ -299,14 +440,14 @@ def render_charts_view(
     sentiment_by_ticker: dict[str, pd.DataFrame] = {}
     market_ranking: pd.DataFrame = pd.DataFrame()
     market_diagnostics: dict[str, object] = {}
-    if automatic_daily_ranking and len(valid_tickers) >= 2:
+    if automatic_daily_ranking and len(live_tickers) >= 2:
         # SQLite reads are local and fast; passing all available histories makes
         # sentiment part of the ranking continuously as the collector adds data.
         sentiment_by_ticker = {
             ticker: load_sentiment_history(ticker)
-            for ticker in valid_tickers
+            for ticker in live_tickers
         }
-        usable_price_data = {ticker: price_data[ticker] for ticker in valid_tickers}
+        usable_price_data = {ticker: price_data[ticker] for ticker in live_tickers}
         with st.spinner(
             "Training the market-wide ensemble and ranking forward opportunities..."
         ):
@@ -574,21 +715,31 @@ def render_charts_view(
     forecast_failures: list[dict[str, object]] = []
     for ticker in top_performers:
         df = price_data[ticker]
+        model_df = prepare_realtime_forecast_history(
+            df,
+            realtime_mode=realtime_mode,
+        )
+        using_stale_data = df.attrs.get("bac_data_status") in {
+            "last_known_good",
+            "provider_stale",
+        }
         bac_log_kv(
             "views.render_charts_view.ticker",
             ticker=ticker,
             price_rows=len(df),
             forecast_points=forecast_points,
+            data_status=df.attrs.get("bac_data_status", "live"),
+            data_fetched_at=df.attrs.get("bac_fetched_at"),
         )
 
         calendar_name = resolve_market_calendar(ticker_source, ticker)
         price_fc = forecast_feature_model(
-            df,
+            model_df,
             points_ahead=forecast_points,
             market_calendar=calendar_name,
         )
         price_backtest = backtest_forecast_model(
-            df,
+            model_df,
             forecast_horizon=forecast_points,
             market_calendar=calendar_name,
         )
@@ -602,14 +753,14 @@ def render_charts_view(
         sentiment_backtest = pd.DataFrame()
         if not realtime_mode and not sentiment_history.empty:
             sentiment_fc = forecast_feature_model(
-                df,
+                model_df,
                 points_ahead=forecast_points,
                 sentiment_history=sentiment_history,
                 include_sentiment=True,
                 market_calendar=calendar_name,
             )
             sentiment_backtest = backtest_forecast_model(
-                df,
+                model_df,
                 forecast_horizon=forecast_points,
                 sentiment_history=sentiment_history,
                 include_sentiment=True,
@@ -635,14 +786,14 @@ def render_charts_view(
         fc = add_forecast_intervals(
             fc,
             backtest,
-            last_close=float(df["Close"].iloc[-1]),
+            last_close=float(model_df["Close"].iloc[-1]),
         )
         if fc.empty:
             # An empty Plotly chart previously looked like "forecasting did
             # nothing." Diagnose the failed ticker only after the fast path has
             # failed, then expose the exact cause to both the user and BAC logs.
             diagnosis = diagnose_forecast_readiness(
-                df,
+                model_df,
                 forecast_horizon=1,
                 market_calendar=calendar_name,
             )
@@ -662,7 +813,7 @@ def render_charts_view(
                 # target lacks enough realized training labels. Keep the useful
                 # prefix and identify precisely where it became unavailable.
                 diagnosis = diagnose_forecast_readiness(
-                    df,
+                    model_df,
                     forecast_horizon=len(fc) + 1,
                     market_calendar=calendar_name,
                 )
@@ -720,7 +871,10 @@ def render_charts_view(
         )
 
         if not fc.empty:
-            last_date = df["Date"].iloc[-1]
+            # The forecast origin is the last stable model bar. The observed
+            # line may already extend a few minutes beyond it because live
+            # prices redraw more frequently than the forecast is recomputed.
+            last_date = model_df["Date"].iloc[-1]
             future_dates = future_projection_dates(
                 last_date,
                 len(fc),
@@ -804,21 +958,31 @@ def render_charts_view(
                     )
                 else:
                     monitored_sentiment = np.nan
-                record_forecast(
-                    market_source=monitoring_market,
-                    ticker=ticker,
-                    forecast_origin=last_date,
-                    target_at=future_dates[-1],
-                    horizon=int(final_projection["projection_point"]),
-                    model_name=active_model,
-                    regime=_volatility_regime(df),
-                    origin_close=float(df["Close"].iloc[-1]),
-                    predicted_close=float(final_projection["pred_close"]),
-                    predicted_return=float(final_projection["pred_return"]),
-                    lower_80=final_projection.get("lower_80", np.nan),
-                    upper_80=final_projection.get("upper_80", np.nan),
-                    sentiment_score=monitored_sentiment,
-                )
+                if using_stale_data:
+                    # Showing a clearly labelled recovery forecast is useful;
+                    # recording it as a new live production prediction is not.
+                    bac_log_kv(
+                        "views.render_charts_view.ticker",
+                        ticker=ticker,
+                        status="stale_forecast_not_recorded",
+                        forecast_origin=str(last_date),
+                    )
+                else:
+                    record_forecast(
+                        market_source=monitoring_market,
+                        ticker=ticker,
+                        forecast_origin=last_date,
+                        target_at=future_dates[-1],
+                        horizon=int(final_projection["projection_point"]),
+                        model_name=active_model,
+                        regime=_volatility_regime(model_df),
+                        origin_close=float(model_df["Close"].iloc[-1]),
+                        predicted_close=float(final_projection["pred_close"]),
+                        predicted_return=float(final_projection["pred_return"]),
+                        lower_80=final_projection.get("lower_80", np.nan),
+                        upper_80=final_projection.get("upper_80", np.nan),
+                        sentiment_score=monitored_sentiment,
+                    )
 
         fig.update_layout(
             title=f"{ticker}: Price History & Feature Forecast",
@@ -826,8 +990,14 @@ def render_charts_view(
             yaxis_title=price_axis_label,
             template="plotly_white",
             height=420,
+            # A stable uirevision tells Plotly to retain zoom, pan, and legend
+            # choices when Streamlit replaces the figure with fresh live data.
+            uirevision=f"{ticker}:{interval}:{'live' if realtime_mode else 'daily'}",
         )
-        st.plotly_chart(fig)
+        st.plotly_chart(
+            fig,
+            key=f"price_forecast_chart_{ticker}_{interval}",
+        )
 
         # The caption under each chart helps connect the picture to the scorecard.
         if not fc.empty:
@@ -866,8 +1036,17 @@ def render_charts_view(
                 current_close=current_close,
                 confidence=confidence,
             )
+            data_label = (
+                "RECOVERY FORECAST using last-known-good market data"
+                if using_stale_data
+                else "current forecast"
+            )
             st.caption(
-                f"{ticker}: current {horizon_label} {active_model.lower()} forecast {current_return_pct:+.2f}% to {price_prefix}{current_close:.2f}. Backtest rating: {confidence}. Recent backtest: {accuracy_text}, {improvement_text}. Sentiment: {sentiment_status}."
+                f"{ticker}: {data_label}; {horizon_label} {active_model.lower()} "
+                f"projection {current_return_pct:+.2f}% to "
+                f"{price_prefix}{current_close:.2f}. Backtest rating: "
+                f"{confidence}. Recent backtest: {accuracy_text}, "
+                f"{improvement_text}. Sentiment: {sentiment_status}."
             )
         elif comparison is not None:
             backtest_rows.append(comparison)
@@ -877,6 +1056,8 @@ def render_charts_view(
         requested_tickers=len(top_performers),
         successful_tickers=forecast_successes,
         failed_or_partial_tickers=len(forecast_failures),
+        live_data_tickers=len(live_tickers),
+        stale_data_tickers=len(stale_tickers),
     )
     if forecast_successes == len(top_performers):
         st.caption(
@@ -1032,6 +1213,65 @@ def render_charts_view(
                 width="stretch",
             )
     bac_log_section("views.render_charts_view", "Charts rendering completed.")
+
+
+@st.fragment(run_every=f"{LIVE_CHART_REFRESH_SECONDS}s")
+def render_live_charts_view(
+    ticker_source: str | None,
+    tickers: List[str],
+    detected_performers: pd.DataFrame,
+    period: str,
+    interval: str,
+    forecast_points: int,
+    price_prefix: str,
+    price_axis_label: str,
+    price_format: str,
+    cache_scope: str,
+) -> None:
+    """Auto-refresh only the real-time chart section on a bounded cadence.
+
+    Streamlit fragments leave the sidebar, news collector status, and the rest
+    of the page untouched. Keeping this wrapper separate also lets the user
+    disable live updates and fall back to a normal one-shot chart render.
+    """
+    # Fragment reruns may execute in a fresh script context, so restore the
+    # market-specific cache namespace before any data or model lookup.
+    set_cache_scope(cache_scope)
+    refresh_started_at = pd.Timestamp.now(tz="UTC")
+    bac_log_kv(
+        "views.live_charts.refresh",
+        status="started",
+        ticker_count=len(tickers),
+        period=period,
+        interval=interval,
+        refresh_seconds=LIVE_CHART_REFRESH_SECONDS,
+        cache_scope=cache_scope,
+        refreshed_at=refresh_started_at.isoformat(),
+    )
+    st.caption(
+        ":green[● Live updates on] · Free Yahoo polling every "
+        f"{LIVE_CHART_REFRESH_SECONDS} seconds · Forecast model refreshes from "
+        f"completed {REALTIME_MODEL_REFRESH_FREQUENCY} buckets · "
+        f"Last refresh started {refresh_started_at.strftime('%H:%M:%S UTC')}"
+    )
+    render_charts_view(
+        ticker_source=ticker_source,
+        tickers=tickers,
+        detected_performers=detected_performers,
+        realtime_mode=True,
+        period=period,
+        interval=interval,
+        forecast_points=forecast_points,
+        price_prefix=price_prefix,
+        price_axis_label=price_axis_label,
+        price_format=price_format,
+    )
+    bac_log_kv(
+        "views.live_charts.refresh",
+        status="completed",
+        ticker_count=len(tickers),
+        refreshed_at=pd.Timestamp.now(tz="UTC").isoformat(),
+    )
 
 
 def render_news_view(

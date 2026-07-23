@@ -67,3 +67,30 @@ NEWS_MIN_INTERVAL_SECONDS = max(float(os.getenv("NEWS_MIN_INTERVAL_SECONDS", "0.
 PROVIDER_CIRCUIT_FAILURES = max(int(os.getenv("PROVIDER_CIRCUIT_FAILURES", "5")), 1)
 PROVIDER_CIRCUIT_SECONDS = max(int(os.getenv("PROVIDER_CIRCUIT_SECONDS", "60")), 1)
 
+# Yahoo remains the zero-configuration development source. Marketstack is an
+# explicit opt-in because it needs an API key and commercial licensing review.
+MARKET_DATA_PROVIDER = (
+    os.getenv("MARKET_DATA_PROVIDER", "yfinance").strip().lower() or "yfinance"
+)
+if MARKET_DATA_PROVIDER not in {"yfinance", "marketstack"}:
+    raise ValueError(
+        "MARKET_DATA_PROVIDER must be either 'yfinance' or 'marketstack'."
+    )
+MARKETSTACK_API_KEY = os.getenv("MARKETSTACK_API_KEY", "").strip()
+MARKETSTACK_BASE_URL = (
+    os.getenv("MARKETSTACK_BASE_URL", "https://api.marketstack.com/v2").strip()
+    or "https://api.marketstack.com/v2"
+)
+MARKET_DATA_LICENSE_CONFIRMED = env_bool(
+    "MARKET_DATA_LICENSE_CONFIRMED",
+    default=False,
+)
+
+# The free live-chart path polls Yahoo rather than opening a streaming socket.
+# Sixty seconds matches the finest useful one-minute bar cadence and avoids
+# wasting provider requests. Clamp custom values so an accidental "1" cannot
+# hammer the public endpoint or keep a lightweight laptop permanently busy.
+LIVE_CHART_REFRESH_SECONDS = min(
+    max(int(os.getenv("LIVE_CHART_REFRESH_SECONDS", "60")), 30),
+    300,
+)

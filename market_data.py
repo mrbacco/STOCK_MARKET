@@ -37,8 +37,20 @@ from cache_control import (
     get_cache_generation,
     shared_cache_get_or_compute,
 )
+from market_snapshot_store import (
+    load_price_history_snapshot,
+    save_price_history_snapshot,
+)
+from marketstack_provider import fetch_marketstack_history
 from provider_runtime import call_provider
-from runtime_config import RUN_IN_PROCESS_SENTIMENT, YAHOO_MIN_INTERVAL_SECONDS
+from runtime_config import (
+    MARKETSTACK_API_KEY,
+    MARKETSTACK_BASE_URL,
+    MARKET_DATA_LICENSE_CONFIRMED,
+    MARKET_DATA_PROVIDER,
+    RUN_IN_PROCESS_SENTIMENT,
+    YAHOO_MIN_INTERVAL_SECONDS,
+)
 from sentiment_service import collect_tickers_once
 from sentiment_store import load_sentiment_history
 
@@ -120,6 +132,12 @@ def configure_yfinance_cache(
 # Configure the provider before any Streamlit cache or worker can fetch prices.
 YFINANCE_CACHE_DIRECTORY = configure_yfinance_cache()
 
+# A completely failed forty-symbol batch must not fan out into forty immediate
+# provider calls on a laptop or production replica. Ten single-symbol retries
+# fully cover manual portfolios and still recover enough automatic candidates
+# to keep the forecast page useful.
+SINGLE_TICKER_FALLBACK_LIMIT = 10
+
 
 def parse_tickers(raw: str) -> List[str]:
     """Normalize comma-separated tickers and preserve the user's original order."""
@@ -179,6 +197,178 @@ def format_price_history(history: pd.DataFrame) -> pd.DataFrame:
     return formatted
 
 
+def _mark_live_price_history(
+    history: pd.DataFrame,
+    *,
+    provider: str = "yfinance",
+) -> pd.DataFrame:
+    """Attach provider provenance without changing the public dataframe shape."""
+    result = history.copy()
+    fetched_at = pd.Timestamp.now(tz="UTC").isoformat()
+    result.attrs["bac_data_status"] = "live"
+    result.attrs["bac_data_provider"] = provider
+    result.attrs["bac_fetched_at"] = fetched_at
+    result.attrs["bac_latest_bar"] = (
+        str(pd.Timestamp(result["Date"].iloc[-1])) if not result.empty else ""
+    )
+    return result
+
+
+def assess_price_history_freshness(
+    history: pd.DataFrame,
+    *,
+    realtime_mode: bool,
+    now: object | None = None,
+) -> dict[str, object]:
+    """Classify severe provider staleness without misreading normal closures.
+
+    Daily data gets a seven-day allowance for weekends and clustered exchange
+    holidays. Intraday data gets four days so a Friday close remains valid over
+    a long weekend, while a frozen endpoint is still detected promptly.
+    """
+    if history.empty or "Date" not in history.columns:
+        return {
+            "status": "unavailable",
+            "latest_bar": None,
+            "age_hours": np.nan,
+        }
+
+    latest_bar = pd.to_datetime(history["Date"], errors="coerce").max()
+    if pd.isna(latest_bar):
+        return {
+            "status": "unavailable",
+            "latest_bar": None,
+            "age_hours": np.nan,
+        }
+
+    current = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if current.tzinfo is not None:
+        current = current.tz_convert("UTC").tz_localize(None)
+    if latest_bar.tzinfo is not None:
+        latest_bar = latest_bar.tz_convert("UTC").tz_localize(None)
+    age_hours = max(float((current - latest_bar).total_seconds() / 3600.0), 0.0)
+    maximum_age_hours = 96.0 if realtime_mode else 24.0 * 7.0
+    status = "fresh" if age_hours <= maximum_age_hours else "stale"
+    diagnosis = {
+        "status": status,
+        "latest_bar": latest_bar,
+        "age_hours": age_hours,
+        "maximum_age_hours": maximum_age_hours,
+    }
+    bac_log_kv(
+        "market_data.freshness",
+        status=status,
+        latest_bar=str(latest_bar),
+        age_hours=age_hours,
+        maximum_age_hours=maximum_age_hours,
+        realtime_mode=realtime_mode,
+    )
+    return diagnosis
+
+
+def _save_price_snapshot_safely(
+    ticker: str,
+    period: str,
+    interval: str,
+    history: pd.DataFrame,
+) -> None:
+    """Persist recovery data without letting a disk issue block live prices."""
+    try:
+        save_price_history_snapshot(
+            ticker,
+            period,
+            interval,
+            history,
+            fetched_at=history.attrs.get("bac_fetched_at"),
+        )
+    except Exception as ex:
+        bac_log_kv(
+            "market_data.snapshot",
+            ticker=ticker,
+            period=period,
+            interval=interval,
+            status="save_failed",
+            error_type=type(ex).__name__,
+            error=str(ex),
+        )
+
+
+def _load_price_snapshot_safely(
+    ticker: str,
+    period: str,
+    interval: str,
+) -> pd.DataFrame:
+    """Return the last complete history when the provider cannot serve one."""
+    try:
+        return load_price_history_snapshot(ticker, period, interval)
+    except Exception as ex:
+        bac_log_kv(
+            "market_data.snapshot",
+            ticker=ticker,
+            period=period,
+            interval=interval,
+            status="load_failed",
+            error_type=type(ex).__name__,
+            error=str(ex),
+        )
+        return pd.DataFrame()
+
+
+def _fetch_single_price_history_from_provider(
+    ticker: str,
+    period: str,
+    interval: str,
+    operation: str,
+) -> pd.DataFrame:
+    """Execute and normalize one direct ticker request with common protection."""
+    bac_log_kv(
+        "market_data.provider_selection",
+        provider=MARKET_DATA_PROVIDER,
+        ticker=ticker,
+        period=period,
+        interval=interval,
+        license_confirmed=MARKET_DATA_LICENSE_CONFIRMED,
+    )
+    if MARKET_DATA_PROVIDER == "marketstack":
+        # The licensing flag is intentionally visible in logs but does not
+        # block a developer from evaluating the free API locally. Deployment
+        # documentation requires it to be true before serving paying users.
+        history = call_provider(
+            "marketstack",
+            operation,
+            lambda: fetch_marketstack_history(
+                ticker,
+                period,
+                interval,
+                api_key=MARKETSTACK_API_KEY,
+                base_url=MARKETSTACK_BASE_URL,
+            ),
+            minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
+        )
+        return (
+            _mark_live_price_history(history, provider="marketstack")
+            if not history.empty
+            else history
+        )
+
+    history = call_provider(
+        "yahoo-finance",
+        operation,
+        lambda: yf.Ticker(ticker).history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+        ),
+        minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
+    )
+    formatted = format_price_history(history)
+    return (
+        _mark_live_price_history(formatted, provider="yfinance")
+        if not formatted.empty
+        else formatted
+    )
+
+
 @st.cache_data(ttl=60, max_entries=100)
 def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Fetch history for one ticker.
@@ -192,21 +382,33 @@ def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> 
         period=period,
         interval=interval,
     )
-    history = call_provider(
-        "yahoo-finance",
-        "single-price-history",
-        lambda: yf.Ticker(ticker).history(
-            period=period,
-            interval=interval,
-            auto_adjust=False,
-        ),
-        minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
-    )
-    formatted = format_price_history(history)
+    try:
+        formatted = _fetch_single_price_history_from_provider(
+            ticker,
+            period,
+            interval,
+            "single-price-history",
+        )
+    except Exception as ex:
+        bac_log_kv(
+            "market_data.get_price_history",
+            ticker=ticker,
+            status="provider_failed",
+            error_type=type(ex).__name__,
+            error=str(ex),
+        )
+        formatted = pd.DataFrame()
+
+    if not formatted.empty:
+        _save_price_snapshot_safely(ticker, period, interval, formatted)
+    else:
+        formatted = _load_price_snapshot_safely(ticker, period, interval)
+
     bac_log_kv(
         "market_data.get_price_history",
         ticker=ticker,
         formatted_rows=len(formatted),
+        data_status=formatted.attrs.get("bac_data_status", "unavailable"),
     )
     return formatted
 
@@ -229,6 +431,39 @@ def _compute_price_history_batch(
         bac_log_section("market_data.get_price_history_batch", "No tickers were provided.")
         return result
 
+    # Marketstack's EOD API is normalized one ticker at a time. Its commercial
+    # request accounting is per symbol, so pretending this is one bulk request
+    # would obscure quota consumption. Snapshot persistence below is shared.
+    if MARKET_DATA_PROVIDER == "marketstack":
+        for ticker in tickers:
+            try:
+                result[ticker] = _fetch_single_price_history_from_provider(
+                    ticker,
+                    period,
+                    interval,
+                    "price-history",
+                )
+            except Exception as ex:
+                bac_log_kv(
+                    "market_data.get_price_history_batch",
+                    provider=MARKET_DATA_PROVIDER,
+                    ticker=ticker,
+                    status="provider_failed",
+                    error_type=type(ex).__name__,
+                    error=str(ex),
+                )
+        for ticker, history in result.items():
+            if not history.empty:
+                _save_price_snapshot_safely(ticker, period, interval, history)
+            else:
+                result[ticker] = _load_price_snapshot_safely(
+                    ticker,
+                    period,
+                    interval,
+                )
+        return result
+
+    data = pd.DataFrame()
     try:
         data = call_provider(
             "yahoo-finance",
@@ -247,57 +482,113 @@ def _compute_price_history_batch(
         )
     except Exception as ex:
         bac_log_kv("market_data.get_price_history_batch", download_error=str(ex))
-        return result
 
     if data is None or data.empty:
         bac_log_section("market_data.get_price_history_batch", "Download returned no rows.")
-        return result
+    else:
+        bac_log_kv(
+            "market_data.get_price_history_batch",
+            raw_shape=data.shape,
+            raw_is_multiindex=isinstance(data.columns, pd.MultiIndex),
+        )
 
-    bac_log_kv(
-        "market_data.get_price_history_batch",
-        raw_shape=data.shape,
-        raw_is_multiindex=isinstance(data.columns, pd.MultiIndex),
-    )
+        # yfinance can return either ticker-first or field-first MultiIndex
+        # layouts. Every successfully normalized frame is marked live so a
+        # downstream forecast can distinguish it from outage recovery data.
+        if isinstance(data.columns, pd.MultiIndex):
+            first_level = set(data.columns.get_level_values(0))
+            second_level = set(data.columns.get_level_values(1))
+            for ticker in tickers:
+                if ticker in first_level:
+                    ticker_data = data[ticker].copy()
+                elif ticker in second_level:
+                    ticker_data = data.xs(ticker, axis=1, level=1).copy()
+                else:
+                    bac_log_kv(
+                        "market_data.get_price_history_batch",
+                        ticker=ticker,
+                        message="Ticker was missing from the MultiIndex payload.",
+                    )
+                    continue
 
-    # yfinance can return either ticker-first or field-first MultiIndex layouts.
-    if isinstance(data.columns, pd.MultiIndex):
-        first_level = set(data.columns.get_level_values(0))
-        second_level = set(data.columns.get_level_values(1))
-        for ticker in tickers:
-            if ticker in first_level:
-                ticker_data = data[ticker].copy()
-            elif ticker in second_level:
-                ticker_data = data.xs(ticker, axis=1, level=1).copy()
-            else:
+                ticker_frame = (
+                    ticker_data.to_frame().T
+                    if isinstance(ticker_data, pd.Series)
+                    else ticker_data
+                )
+                formatted = format_price_history(ticker_frame.dropna(how="all"))
+                result[ticker] = (
+                    _mark_live_price_history(formatted)
+                    if not formatted.empty
+                    else formatted
+                )
                 bac_log_kv(
                     "market_data.get_price_history_batch",
                     ticker=ticker,
-                    message="Ticker was missing from the MultiIndex payload.",
+                    formatted_rows=len(formatted),
                 )
-                continue
+        else:
+            formatted = format_price_history(data.copy().dropna(how="all"))
+            result[tickers[0]] = (
+                _mark_live_price_history(formatted)
+                if not formatted.empty
+                else formatted
+            )
+            bac_log_kv(
+                "market_data.get_price_history_batch",
+                ticker=tickers[0],
+                formatted_rows=len(formatted),
+            )
 
-            ticker_frame = ticker_data.to_frame().T if isinstance(ticker_data, pd.Series) else ticker_data
-            formatted = format_price_history(ticker_frame.dropna(how="all"))
-            result[ticker] = formatted
+    missing_tickers = [ticker for ticker in tickers if result[ticker].empty]
+    retry_tickers = missing_tickers[:SINGLE_TICKER_FALLBACK_LIMIT]
+    bac_log_list_preview(
+        "market_data.get_price_history_batch",
+        "single_ticker_retries",
+        retry_tickers,
+    )
+    for ticker in retry_tickers:
+        try:
+            result[ticker] = _fetch_single_price_history_from_provider(
+                ticker,
+                period,
+                interval,
+                "single-price-history-fallback",
+            )
+        except Exception as ex:
             bac_log_kv(
                 "market_data.get_price_history_batch",
                 ticker=ticker,
-                formatted_rows=len(formatted),
+                status="single_ticker_fallback_failed",
+                error_type=type(ex).__name__,
+                error=str(ex),
             )
-    else:
-        formatted = format_price_history(data.copy().dropna(how="all"))
-        result[tickers[0]] = formatted
-        bac_log_kv(
-            "market_data.get_price_history_batch",
-            ticker=tickers[0],
-            formatted_rows=len(formatted),
-        )
+
+    # Persist every fresh frame before loading stale fallbacks. The snapshot is
+    # replaced only by a complete, non-empty history.
+    for ticker, history in result.items():
+        if not history.empty and history.attrs.get("bac_data_status") == "live":
+            _save_price_snapshot_safely(ticker, period, interval, history)
+
+    for ticker in tickers:
+        if result[ticker].empty:
+            result[ticker] = _load_price_snapshot_safely(ticker, period, interval)
 
     non_empty_tickers = [ticker for ticker, frame in result.items() if not frame.empty]
+    stale_tickers = [
+        ticker
+        for ticker, frame in result.items()
+        if frame.attrs.get("bac_data_status") == "last_known_good"
+    ]
     bac_log_list_preview(
         "market_data.get_price_history_batch",
         "non_empty_tickers",
         non_empty_tickers,
+    )
+    bac_log_list_preview(
+        "market_data.get_price_history_batch",
+        "last_known_good_tickers",
+        stale_tickers,
     )
     return result
 

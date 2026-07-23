@@ -42,7 +42,7 @@ from market_data import (
 )
 from sentiment_service import ensure_background_sentiment_collector
 from sentiment_store import get_collector_status, update_watchlist
-from runtime_config import RUN_IN_PROCESS_SENTIMENT
+from runtime_config import LIVE_CHART_REFRESH_SECONDS, RUN_IN_PROCESS_SENTIMENT
 from ticker_catalog import (
     DEFAULT_MANUAL_MARKET,
     format_manual_ticker_option,
@@ -51,7 +51,12 @@ from ticker_catalog import (
     manual_market_labels,
     normalize_manual_tickers,
 )
-from views import render_charts_view, render_news_view, render_overview_view
+from views import (
+    render_charts_view,
+    render_live_charts_view,
+    render_news_view,
+    render_overview_view,
+)
 
 st.set_page_config(
     page_title="Stock Market Intelligence",
@@ -190,10 +195,19 @@ with st.sidebar:
 
     # The history controls are mode-specific so the user sees only relevant options.
     if realtime_mode:
+        live_updates_enabled = st.toggle(
+            "Live chart updates",
+            value=True,
+            help=(
+                "Refresh the Charts view automatically using free Yahoo Finance "
+                f"polling every {LIVE_CHART_REFRESH_SECONDS} seconds."
+            ),
+        )
         period = st.selectbox("Intraday Window", ["1d", "5d"], index=0)
         interval = st.selectbox("Intraday Interval", ["1m", "2m", "5m"], index=0)
         forecast_points = st.slider("Forecast horizon bars", min_value=7, max_value=60, value=30)
     else:
+        live_updates_enabled = False
         period = st.selectbox("History Window", ["6mo", "1y", "2y"], index=1)
         interval = "1d"
         forecast_points = st.slider(
@@ -208,6 +222,7 @@ with st.sidebar:
         period=period,
         interval=interval,
         forecast_points=forecast_points,
+        live_updates_enabled=live_updates_enabled,
     )
 
     # Period and interval complete the namespace, so refreshing a 1-minute view
@@ -292,7 +307,13 @@ bac_log_kv(
 bac_log_list_preview("app.tickers", "resolved_tickers", tickers)
 
 if realtime_mode:
-    st.info("Real-time mode is using manual refresh. Click 'Refresh now' to update values.")
+    if live_updates_enabled:
+        st.info(
+            f"Live chart polling is on. The Charts view refreshes every "
+            f"{LIVE_CHART_REFRESH_SECONDS} seconds while this browser tab is active."
+        )
+    else:
+        st.info("Live chart polling is off. Click 'Refresh now' to update values.")
 
 if ticker_source in {IRELAND_SOURCE, FTSE_MIB_SOURCE}:
     st.caption(
@@ -373,18 +394,38 @@ if active_view == "Overview":
     )
 elif active_view == "Charts":
     bac_log_section("app", "Rendering charts view.")
-    render_charts_view(
-        ticker_source=ticker_source,
-        tickers=tickers,
-        detected_performers=detected_performers,
-        realtime_mode=realtime_mode,
-        period=period,
-        interval=interval,
-        forecast_points=forecast_points,
-        price_prefix=price_prefix,
-        price_axis_label=price_axis_label,
-        price_format=price_format,
-    )
+    if realtime_mode and live_updates_enabled:
+        bac_log_kv(
+            "app.live_charts",
+            status="enabled",
+            refresh_seconds=LIVE_CHART_REFRESH_SECONDS,
+            cache_scope=cache_scope,
+        )
+        render_live_charts_view(
+            ticker_source=ticker_source,
+            tickers=tickers,
+            detected_performers=detected_performers,
+            period=period,
+            interval=interval,
+            forecast_points=forecast_points,
+            price_prefix=price_prefix,
+            price_axis_label=price_axis_label,
+            price_format=price_format,
+            cache_scope=cache_scope,
+        )
+    else:
+        render_charts_view(
+            ticker_source=ticker_source,
+            tickers=tickers,
+            detected_performers=detected_performers,
+            realtime_mode=realtime_mode,
+            period=period,
+            interval=interval,
+            forecast_points=forecast_points,
+            price_prefix=price_prefix,
+            price_axis_label=price_axis_label,
+            price_format=price_format,
+        )
 else:
     bac_log_section("app", "Rendering news view.")
     render_news_view(
