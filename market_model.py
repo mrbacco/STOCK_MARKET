@@ -703,3 +703,16 @@ def rank_market_candidates(
         )
         bac_log_kv("market_model.rank_market_candidates", status="worker_queued", error=str(ex))
         return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
+    except Exception as ex:
+        # The pooled ranking is an enhancement over the per-ticker forecast
+        # curves. Keep those curves available if a cross-sectional estimator or
+        # shared-cache entry fails, while preserving the exact failure in logs.
+        bac_log_kv(
+            "market_model.rank_market_candidates",
+            status="failed",
+            error_type=type(ex).__name__,
+            error=str(ex),
+            candidate_tickers=len(price_data),
+            forecast_horizon=forecast_horizon,
+        )
+        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}

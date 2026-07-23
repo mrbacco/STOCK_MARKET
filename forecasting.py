@@ -382,6 +382,128 @@ def predict_horizon_close(
     }
 
 
+def diagnose_forecast_readiness(
+    price_history: pd.DataFrame,
+    forecast_horizon: int = 1,
+    sentiment_history: pd.DataFrame | None = None,
+    include_sentiment: bool = False,
+    market_calendar: str = "NYSE",
+) -> dict[str, object]:
+    """Explain why a forecast cannot be produced instead of failing silently.
+
+    The normal forecasting path stays optimized for successful requests. This
+    helper is only called after an empty or truncated result, so the UI can tell
+    the user whether the problem is missing provider data, incomplete features,
+    insufficient training history, or a later execution/cache failure.
+    """
+    bac_log_kv(
+        "forecast.diagnose_readiness",
+        incoming_rows=len(price_history),
+        forecast_horizon=forecast_horizon,
+        include_sentiment=include_sentiment,
+    )
+    try:
+        history = prepare_model_history(price_history)
+        if history.empty:
+            diagnosis = {
+                "status": "invalid_history",
+                "message": (
+                    "No usable OHLCV price history was returned by the market-data provider."
+                ),
+                "history_rows": 0,
+            }
+            bac_log_kv("forecast.diagnose_readiness", **diagnosis)
+            return diagnosis
+
+        if forecast_horizon < 1:
+            diagnosis = {
+                "status": "invalid_horizon",
+                "message": "The forecast horizon must be at least one bar.",
+                "history_rows": len(history),
+            }
+            bac_log_kv("forecast.diagnose_readiness", **diagnosis)
+            return diagnosis
+
+        feature_columns = (
+            (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
+            if include_sentiment
+            else PRICE_FEATURE_COLUMNS
+        )
+        feature_frame = build_feature_frame(
+            history,
+            sentiment_history=sentiment_history,
+            include_sentiment=include_sentiment,
+            latest_sentiment_as_of=pd.Timestamp.now(tz="UTC"),
+            market_calendar=market_calendar,
+        )
+        latest_features = feature_frame.iloc[[-1]].replace([np.inf, -np.inf], np.nan)
+        missing_latest_features = [
+            column
+            for column in feature_columns
+            if column not in latest_features.columns
+            or pd.isna(latest_features[column].iloc[0])
+        ]
+        if missing_latest_features:
+            diagnosis = {
+                "status": "incomplete_latest_features",
+                "message": (
+                    "The latest market bar cannot be scored because these inputs "
+                    f"are missing: {', '.join(missing_latest_features)}."
+                ),
+                "history_rows": len(history),
+                "missing_features": missing_latest_features,
+            }
+            bac_log_kv("forecast.diagnose_readiness", **diagnosis)
+            return diagnosis
+
+        training_frame = build_forecast_training_frame(
+            history,
+            forecast_horizon,
+            sentiment_history=sentiment_history,
+            include_sentiment=include_sentiment,
+            market_calendar=market_calendar,
+        )
+        if len(training_frame) < MIN_MODEL_TRAINING_ROWS:
+            model_name = "price-and-sentiment" if include_sentiment else "price-only"
+            diagnosis = {
+                "status": "insufficient_training_history",
+                "message": (
+                    f"The {model_name} model has {len(training_frame)} usable training "
+                    f"rows; it needs at least {MIN_MODEL_TRAINING_ROWS}."
+                ),
+                "history_rows": len(history),
+                "training_rows": len(training_frame),
+                "minimum_training_rows": MIN_MODEL_TRAINING_ROWS,
+            }
+            bac_log_kv("forecast.diagnose_readiness", **diagnosis)
+            return diagnosis
+
+        # If all model inputs are valid, the empty result came from the cache,
+        # worker, or estimator execution layer rather than market-data quality.
+        diagnosis = {
+            "status": "execution_failure",
+            "message": (
+                "Forecast inputs are ready, but model execution did not return a result. "
+                "Check the accompanying [BAC_LOG] error for the cache or worker failure."
+            ),
+            "history_rows": len(history),
+            "training_rows": len(training_frame),
+        }
+        bac_log_kv("forecast.diagnose_readiness", **diagnosis)
+        return diagnosis
+    except Exception as ex:
+        diagnosis = {
+            "status": "diagnostic_failure",
+            "message": (
+                "Forecast diagnostics also failed; inspect the [BAC_LOG] exception details."
+            ),
+            "error_type": type(ex).__name__,
+            "error": str(ex),
+        }
+        bac_log_kv("forecast.diagnose_readiness", **diagnosis)
+        return diagnosis
+
+
 def _compute_forecast_feature_model(
     price_history: pd.DataFrame,
     points_ahead: int = 30,
@@ -525,6 +647,20 @@ def forecast_feature_model(
             ),
         )
         bac_log_kv("forecast.forecast_feature_model", status="worker_queued", error=str(ex))
+        return pd.DataFrame()
+    except Exception as ex:
+        # One bad ticker, cache entry, or estimator fit must not take down the
+        # entire Streamlit charts page. The caller diagnoses the empty frame and
+        # renders an explicit ticker-level warning.
+        bac_log_kv(
+            "forecast.forecast_feature_model",
+            status="failed",
+            error_type=type(ex).__name__,
+            error=str(ex),
+            history_rows=len(price_history),
+            points_ahead=points_ahead,
+            include_sentiment=include_sentiment,
+        )
         return pd.DataFrame()
 
 
@@ -734,6 +870,20 @@ def backtest_forecast_model(
             ),
         )
         bac_log_kv("forecast.backtest_forecast_model", status="worker_queued", error=str(ex))
+        return pd.DataFrame()
+    except Exception as ex:
+        # Backtest availability affects confidence bands, not the ability to
+        # publish the current point forecast. Degrade to an uncalibrated curve
+        # and keep the failure visible in structured logs.
+        bac_log_kv(
+            "forecast.backtest_forecast_model",
+            status="failed",
+            error_type=type(ex).__name__,
+            error=str(ex),
+            history_rows=len(price_history),
+            forecast_horizon=forecast_horizon,
+            include_sentiment=include_sentiment,
+        )
         return pd.DataFrame()
 
 

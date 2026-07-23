@@ -12,6 +12,9 @@ x-runtime-environment: &runtime-environment
   PROVIDER_BACKOFF_SECONDS: ${PROVIDER_BACKOFF_SECONDS:-0.5}
   YAHOO_MIN_INTERVAL_SECONDS: ${YAHOO_MIN_INTERVAL_SECONDS:-0.25}
   NEWS_MIN_INTERVAL_SECONDS: ${NEWS_MIN_INTERVAL_SECONDS:-0.20}
+  # yfinance persists timezone/cookie metadata in SQLite. Keep those files in
+  # the image's writable application-data directory for every process role.
+  YFINANCE_CACHE_DIR: ${YFINANCE_CACHE_DIR:-/app/data/yfinance-cache}
 
 services:
   postgres:

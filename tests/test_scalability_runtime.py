@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import cache_control
 import forecasting
+import market_data
 import pandas as pd
 from database import database_connection
 from provider_runtime import call_provider
@@ -96,6 +97,51 @@ class ScalabilityRuntimeTest(unittest.TestCase):
 
         pd.testing.assert_frame_equal(result, expected)
         self.assertTrue(shared_cache.call_args.kwargs["allow_compute"])
+
+    def test_yfinance_cache_uses_a_verified_writable_directory(self):
+        """Provider metadata must not depend on an unwritable user cache."""
+        with (
+            tempfile.TemporaryDirectory() as temporary_directory,
+            patch.object(market_data.yf, "set_tz_cache_location") as set_location,
+        ):
+            cache_path = Path(temporary_directory) / "provider-cache"
+            configured = market_data.configure_yfinance_cache(cache_path)
+
+            self.assertEqual(cache_path, configured)
+            self.assertTrue(cache_path.is_dir())
+            self.assertFalse((cache_path / ".bac-yfinance-write-probe").exists())
+            set_location.assert_called_once_with(str(cache_path))
+
+    def test_forecast_execution_failure_degrades_to_an_empty_result(self):
+        """One estimator/cache failure must not crash the entire charts page."""
+        history = pd.DataFrame(
+            {
+                "Date": [pd.Timestamp("2026-01-01")],
+                "Open": [100.0],
+                "High": [101.0],
+                "Low": [99.0],
+                "Close": [100.0],
+                "Volume": [1_000_000.0],
+            }
+        )
+        with (
+            patch.object(forecasting, "get_cache_generation", return_value=0),
+            patch.object(
+                forecasting,
+                "_forecast_feature_model_cached",
+                side_effect=RuntimeError("broken model artifact"),
+            ),
+        ):
+            result = forecasting.forecast_feature_model(history, points_ahead=3)
+
+        self.assertTrue(result.empty)
+
+    def test_empty_provider_history_has_an_actionable_diagnosis(self):
+        """An empty forecast should say that market data, not AI, is missing."""
+        diagnosis = forecasting.diagnose_forecast_readiness(pd.DataFrame())
+
+        self.assertEqual("invalid_history", diagnosis["status"])
+        self.assertIn("market-data provider", diagnosis["message"])
 
 
 if __name__ == "__main__":

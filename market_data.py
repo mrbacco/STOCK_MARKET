@@ -14,7 +14,11 @@ mixing those concerns into the Streamlit layout code.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+from pathlib import Path
+import tempfile
 from typing import List, Mapping
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -37,6 +41,84 @@ from provider_runtime import call_provider
 from runtime_config import RUN_IN_PROCESS_SENTIMENT, YAHOO_MIN_INTERVAL_SECONDS
 from sentiment_service import collect_tickers_once
 from sentiment_store import load_sentiment_history
+
+
+def configure_yfinance_cache(
+    cache_directory: str | Path | None = None,
+) -> Path | None:
+    """Point yfinance's SQLite caches at a verified writable directory.
+
+    yfinance stores timezone, cookie, and ISIN metadata in small SQLite files.
+    On Windows sandboxes, containers, and some hosted environments its default
+    user-cache location can exist but still be unwritable. The resulting
+    ``unable to open database file`` exception prevents price history from
+    loading, which in turn leaves every downstream forecast empty.
+
+    A caller-provided directory wins, followed by ``YFINANCE_CACHE_DIR``. The
+    project data directory is the normal local/Docker location, while the OS
+    temporary directory is a final portable fallback for read-only deployments.
+    """
+    configured_value = (
+        str(cache_directory)
+        if cache_directory is not None
+        else os.getenv("YFINANCE_CACHE_DIR", "").strip()
+    )
+    candidates = [
+        Path(configured_value) if configured_value else None,
+        Path(__file__).resolve().parent / "data" / "yfinance-cache",
+        Path(tempfile.gettempdir()) / "stock-market-yfinance-cache",
+    ]
+
+    # Preserve candidate order while avoiding duplicate work when the system
+    # temporary directory happens to resolve inside the project directory.
+    checked_paths: set[str] = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        normalized = str(candidate.resolve())
+        if normalized in checked_paths:
+            continue
+        checked_paths.add(normalized)
+
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+
+            # Creating a directory alone is not a sufficient permission test on
+            # all mounted filesystems. A tiny probe verifies that SQLite will be
+            # able to create and update its database files here.
+            write_probe = candidate / ".bac-yfinance-write-probe"
+            write_probe.write_text("ok", encoding="utf-8")
+            write_probe.unlink(missing_ok=True)
+
+            # This must run before the first Ticker/download call. It configures
+            # all yfinance SQLite caches despite the legacy function name.
+            yf.set_tz_cache_location(str(candidate))
+            bac_log_kv(
+                "market_data.yfinance_cache",
+                status="configured",
+                directory=str(candidate),
+            )
+            return candidate
+        except (OSError, RuntimeError) as ex:
+            bac_log_kv(
+                "market_data.yfinance_cache",
+                status="candidate_unavailable",
+                directory=str(candidate),
+                error_type=type(ex).__name__,
+                error=str(ex),
+            )
+
+    # Price calls retain their existing provider-level error handling, but this
+    # explicit log explains why those calls may subsequently fail.
+    bac_log_section(
+        "market_data.yfinance_cache",
+        "No writable yfinance cache directory was available.",
+    )
+    return None
+
+
+# Configure the provider before any Streamlit cache or worker can fetch prices.
+YFINANCE_CACHE_DIRECTORY = configure_yfinance_cache()
 
 
 def parse_tickers(raw: str) -> List[str]:

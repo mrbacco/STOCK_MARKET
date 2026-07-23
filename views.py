@@ -36,6 +36,7 @@ from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
 from forecasting import (
     add_forecast_intervals,
     backtest_forecast_model,
+    diagnose_forecast_readiness,
     forecast_feature_model,
     future_projection_dates,
     summarize_model_comparison,
@@ -569,6 +570,8 @@ def render_charts_view(
     )
 
     backtest_rows = []
+    forecast_successes = 0
+    forecast_failures: list[dict[str, object]] = []
     for ticker in top_performers:
         df = price_data[ticker]
         bac_log_kv(
@@ -634,6 +637,55 @@ def render_charts_view(
             backtest,
             last_close=float(df["Close"].iloc[-1]),
         )
+        if fc.empty:
+            # An empty Plotly chart previously looked like "forecasting did
+            # nothing." Diagnose the failed ticker only after the fast path has
+            # failed, then expose the exact cause to both the user and BAC logs.
+            diagnosis = diagnose_forecast_readiness(
+                df,
+                forecast_horizon=1,
+                market_calendar=calendar_name,
+            )
+            forecast_failures.append({"ticker": ticker, **diagnosis})
+            bac_log_kv(
+                "views.render_charts_view.forecast_status",
+                ticker=ticker,
+                requested_points=forecast_points,
+                returned_points=0,
+                **diagnosis,
+            )
+            st.warning(f"{ticker}: forecast unavailable. {diagnosis['message']}")
+        else:
+            forecast_successes += 1
+            if len(fc) < forecast_points:
+                # A curve can stop at a later horizon when only the longest
+                # target lacks enough realized training labels. Keep the useful
+                # prefix and identify precisely where it became unavailable.
+                diagnosis = diagnose_forecast_readiness(
+                    df,
+                    forecast_horizon=len(fc) + 1,
+                    market_calendar=calendar_name,
+                )
+                forecast_failures.append({"ticker": ticker, **diagnosis})
+                bac_log_kv(
+                    "views.render_charts_view.forecast_status",
+                    ticker=ticker,
+                    requested_points=forecast_points,
+                    returned_points=len(fc),
+                    **diagnosis,
+                )
+                st.warning(
+                    f"{ticker}: showing {len(fc)} of {forecast_points} requested "
+                    f"forecast points. {diagnosis['message']}"
+                )
+            else:
+                bac_log_kv(
+                    "views.render_charts_view.forecast_status",
+                    ticker=ticker,
+                    requested_points=forecast_points,
+                    returned_points=len(fc),
+                    status="ready",
+                )
         bac_log_kv(
             "views.render_charts_view.ticker",
             ticker=ticker,
@@ -819,6 +871,28 @@ def render_charts_view(
             )
         elif comparison is not None:
             backtest_rows.append(comparison)
+
+    bac_log_kv(
+        "views.render_charts_view.forecast_summary",
+        requested_tickers=len(top_performers),
+        successful_tickers=forecast_successes,
+        failed_or_partial_tickers=len(forecast_failures),
+    )
+    if forecast_successes == len(top_performers):
+        st.caption(
+            f"Forecast pipeline ready: {forecast_successes}/{len(top_performers)} "
+            "ticker curves generated."
+        )
+    elif forecast_successes:
+        st.warning(
+            f"Forecast pipeline partially available: {forecast_successes}/"
+            f"{len(top_performers)} ticker curves generated. See ticker warnings above."
+        )
+    else:
+        st.error(
+            "Forecast pipeline unavailable for this selection. The ticker warnings "
+            "above and [BAC_LOG] entries contain the exact failure reasons."
+        )
 
     st.subheader("Forecast backtest")
     st.caption(
