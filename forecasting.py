@@ -481,7 +481,15 @@ def _forecast_feature_model_cached(
             include_sentiment,
             market_calendar,
         ),
-        allow_compute=not ANALYTICS_READ_ONLY,
+        # A forecast curve is the primary chart output and is inexpensive
+        # compared with the walk-forward backtest. Returning an empty frame on
+        # a cold production cache made the page look permanently broken because
+        # Streamlit had no event that would rerun it after the worker finished.
+        #
+        # Always permit this lightweight calculation on the requesting replica.
+        # The Redis lock inside shared_cache_get_or_compute still guarantees
+        # that horizontally scaled replicas do not stampede the model.
+        allow_compute=True,
     )
 
 
@@ -492,7 +500,7 @@ def forecast_feature_model(
     include_sentiment: bool = False,
     market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
-    """Read a worker-warmed forecast or compute it in local development mode."""
+    """Return a shared forecast immediately, computing a cold curve if needed."""
     generation = get_cache_generation(f"model:{current_cache_scope()}")
     try:
         return _forecast_feature_model_cached(

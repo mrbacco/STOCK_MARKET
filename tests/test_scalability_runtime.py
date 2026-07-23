@@ -74,22 +74,28 @@ class ScalabilityRuntimeTest(unittest.TestCase):
         self.assertEqual(result, "ready")
         self.assertEqual(len(attempts), 2)
 
-    def test_read_only_forecast_miss_is_queued(self):
-        """A web cache miss should enqueue work and return without model fitting."""
+    def test_forecast_curve_can_compute_on_the_first_web_render(self):
+        """A cold curve must not leave Streamlit waiting for a nonexistent rerun."""
         history = pd.DataFrame({"Date": [pd.Timestamp("2026-01-01")], "Close": [100.0]})
-        with (
-            patch.object(
-                forecasting,
-                "_forecast_feature_model_cached",
-                side_effect=cache_control.SharedCacheMiss("cold"),
-            ),
-            patch.object(forecasting, "enqueue_analytics_job", return_value=True) as enqueue,
-        ):
-            result = forecasting.forecast_feature_model(history, points_ahead=3)
+        expected = pd.DataFrame({"pred_close": [101.0]})
+        forecasting._forecast_feature_model_cached.clear()
+        with patch.object(
+            forecasting,
+            "shared_cache_get_or_compute",
+            return_value=expected,
+        ) as shared_cache:
+            result = forecasting._forecast_feature_model_cached(
+                history,
+                3,
+                None,
+                False,
+                "NYSE",
+                0,
+            )
+        forecasting._forecast_feature_model_cached.clear()
 
-        self.assertTrue(result.empty)
-        enqueue.assert_called_once()
-        self.assertEqual(enqueue.call_args.args[0], "forecast-curve")
+        pd.testing.assert_frame_equal(result, expected)
+        self.assertTrue(shared_cache.call_args.kwargs["allow_compute"])
 
 
 if __name__ == "__main__":

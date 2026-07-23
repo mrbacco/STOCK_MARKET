@@ -66,6 +66,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      # The shared image normally checks Streamlit on port 8501. This worker
+      # has no HTTP server, so verify that PID 1 is still the expected worker
+      # process instead of reporting a false "unhealthy" container.
+      test: ["CMD", "python", "-c", "from pathlib import Path; import sys; sys.exit(0 if b'sentiment_worker.py' in Path('/proc/1/cmdline').read_bytes() else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   analytics-worker:
     build: .
@@ -79,6 +88,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      # Analytics is also a long-running Python process rather than a
+      # Streamlit server. Checking its command line keeps Docker health state
+      # aligned with the worker role while failures remain visible in logs.
+      test: ["CMD", "python", "-c", "from pathlib import Path; import sys; sys.exit(0 if b'analytics_worker.py' in Path('/proc/1/cmdline').read_bytes() else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   proxy:
     image: nginx:1.27-alpine
