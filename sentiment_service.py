@@ -26,7 +26,7 @@ from app_config import (
     SENTIMENT_COLLECTION_INTERVAL_SECONDS,
     SENTIMENT_MAX_NEWS_ITEMS,
 )
-from app_logging import bac_log_kv, bac_log_section
+from app_logging import bac_debug_kv, bac_log_kv, bac_log_section
 from provider_runtime import call_provider
 from runtime_config import NEWS_MIN_INTERVAL_SECONDS
 from sentiment_analysis import get_sentiment_analyzer
@@ -131,7 +131,7 @@ def fetch_news_candidates(
                 "content_hash": _content_hash(title, source),
             }
         )
-    bac_log_kv(
+    bac_debug_kv(
         "sentiment.fetch",
         ticker=ticker,
         candidates=len(candidates),

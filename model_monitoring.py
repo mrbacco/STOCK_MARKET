@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app_logging import bac_log_kv, bac_log_section
+from app_logging import bac_debug_kv, bac_log_kv
 from database import database_connection
 
 
@@ -160,7 +160,7 @@ def record_forecast(
             """,
             values,
         )
-    bac_log_kv(
+    bac_debug_kv(
         "monitoring.record_forecast",
         market_source=market_source,
         ticker=ticker,

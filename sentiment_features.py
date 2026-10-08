@@ -18,7 +18,7 @@ from app_config import (
     SENTIMENT_FEATURE_COLUMNS,
     SENTIMENT_FEATURE_WINDOW_HOURS,
 )
-from app_logging import bac_log_kv, bac_log_section
+from app_logging import bac_debug_kv, bac_debug_section
 
 try:
     import pandas_market_calendars as market_calendars
@@ -118,7 +118,7 @@ def _price_cutoffs(
                 )
                 for timestamp in dates
             ]
-            bac_log_kv(
+            bac_debug_kv(
                 "sentiment_features.price_cutoffs",
                 market_calendar=market_calendar,
                 daily_rows=len(dates),
@@ -128,13 +128,13 @@ def _price_cutoffs(
             )
             return cutoffs
         except Exception as ex:
-            bac_log_kv(
+            bac_debug_kv(
                 "sentiment_features.price_cutoffs",
                 market_calendar=market_calendar,
                 calendar_error=str(ex),
             )
 
-    bac_log_section(
+    bac_debug_section(
         "sentiment_features.price_cutoffs",
         "Using end-of-day fallback because the exchange schedule was unavailable.",
     )
@@ -217,15 +217,15 @@ def build_sentiment_feature_frame(
         columns=SENTIMENT_FEATURE_COLUMNS,
     )
     if price_history.empty or "Date" not in price_history.columns:
-        bac_log_section("sentiment_features.build", "Price history was empty or missing Date.")
+        bac_debug_section("sentiment_features.build", "Price history was empty or missing Date.")
         return empty_result
     if sentiment_history is None or sentiment_history.empty:
-        bac_log_kv("sentiment_features.build", sentiment_rows=0, price_rows=len(price_history))
+        bac_debug_kv("sentiment_features.build", sentiment_rows=0, price_rows=len(price_history))
         return empty_result
 
     required = {"published_at", "first_seen_at", "sentiment"}
     if not required.issubset(sentiment_history.columns):
-        bac_log_kv(
+        bac_debug_kv(
             "sentiment_features.build",
             missing_columns=sorted(required.difference(sentiment_history.columns)),
         )
@@ -353,7 +353,7 @@ def build_sentiment_feature_frame(
 
     result = pd.DataFrame(rows, index=price_history.index)
     result = result.loc[:, SENTIMENT_FEATURE_COLUMNS].replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    bac_log_kv(
+    bac_debug_kv(
         "sentiment_features.build",
         price_rows=len(price_history),
         incoming_news_rows=len(sentiment_history),

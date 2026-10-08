@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from app_config import SENTIMENT_MODEL_NAME
-from app_logging import bac_log_kv, bac_log_section
+from app_logging import bac_debug_kv, bac_debug_section, bac_log_kv, bac_log_section
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ def normalize_finbert_scores(
         negative_probability=negative,
         model_name=model_name,
     )
-    bac_log_kv(
+    bac_debug_kv(
         "sentiment.normalize_finbert_scores",
         model_name=model_name,
         label=score.label,
@@ -122,7 +122,7 @@ class FinancialSentimentAnalyzer:
             negative_probability=negative,
             model_name="vader-fallback",
         )
-        bac_log_kv(
+        bac_debug_kv(
             "sentiment.analyzer.vader",
             text_length=len(text),
             label=score.label,
@@ -133,18 +133,18 @@ class FinancialSentimentAnalyzer:
     def score_many(self, texts: Iterable[str]) -> list[SentimentScore]:
         """Score a batch while serializing access to the shared model object."""
         clean_texts = [str(text).strip() for text in texts]
-        bac_log_kv(
+        bac_debug_kv(
             "sentiment.analyzer.score_many",
             incoming_count=len(clean_texts),
             active_model=self.active_model_name,
         )
         if not clean_texts:
-            bac_log_section("sentiment.analyzer.score_many", "Received an empty batch.")
+            bac_debug_section("sentiment.analyzer.score_many", "Received an empty batch.")
             return []
 
         if self._pipeline is None:
             scores = [self._score_with_vader(text) for text in clean_texts]
-            bac_log_kv(
+            bac_debug_kv(
                 "sentiment.analyzer.score_many",
                 output_count=len(scores),
                 mode="vader_only",
@@ -162,7 +162,7 @@ class FinancialSentimentAnalyzer:
             if outputs and isinstance(outputs[0], dict):
                 outputs = [outputs]
             scores = [normalize_finbert_scores(output, self.model_name) for output in outputs]
-            bac_log_kv(
+            bac_debug_kv(
                 "sentiment.analyzer.score_many",
                 output_count=len(scores),
                 mode="finbert",
@@ -176,7 +176,7 @@ class FinancialSentimentAnalyzer:
                 error=str(ex),
             )
             scores = [self._score_with_vader(text) for text in clean_texts]
-            bac_log_kv(
+            bac_debug_kv(
                 "sentiment.analyzer.score_many",
                 output_count=len(scores),
                 mode="fallback_after_exception",

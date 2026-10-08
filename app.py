@@ -33,7 +33,12 @@ from app_config import (
     initialize_session_defaults,
     resolve_price_display,
 )
-from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from app_logging import (
+    bac_debug_kv,
+    bac_debug_list_preview,
+    bac_log_kv,
+    bac_log_section,
+)
 from cache_control import invalidate_market_scope, set_cache_scope
 from market_data import (
     get_ftse_mib_top_performers,
@@ -82,12 +87,12 @@ sentiment_collector = (
     if RUN_IN_PROCESS_SENTIMENT
     else None
 )
-bac_log_kv(
+bac_debug_kv(
     "app.sentiment_runtime",
     in_process_collector=RUN_IN_PROCESS_SENTIMENT,
     worker_mode=not RUN_IN_PROCESS_SENTIMENT,
 )
-bac_log_kv(
+bac_debug_kv(
     "app.session_defaults",
     active_view=st.session_state.get("active_view"),
     ticker_source=st.session_state.get("ticker_source"),
@@ -113,7 +118,7 @@ with st.sidebar:
         width="stretch",
     )
     cache_scope = str(ticker_source or DEFAULT_TICKER_SOURCE)
-    bac_log_kv("app.sidebar", ticker_source=ticker_source)
+    bac_debug_kv("app.sidebar", ticker_source=ticker_source)
 
     if ticker_source == MANUAL_SOURCE:
         # Manual mode first narrows the context to a geographical exchange. This
@@ -124,7 +129,7 @@ with st.sidebar:
             key="manual_market",
         )
         manual_market_preset = get_manual_market_preset(manual_market_label)
-        bac_log_kv(
+        bac_debug_kv(
             "app.sidebar.manual_market",
             market=manual_market_label,
             exchange=manual_market_preset.exchange,
@@ -158,7 +163,7 @@ with st.sidebar:
             f"{manual_market_preset.description} {suffix_guidance} "
             "The selected market controls the currency labels."
         )
-        bac_log_list_preview(
+        bac_debug_list_preview(
             "app.sidebar.manual_market",
             "manual_ticker_choices",
             [str(choice) for choice in manual_ticker_choices],
@@ -191,7 +196,7 @@ with st.sidebar:
         )
 
     realtime_mode = st.toggle("Real-time Mode", value=False)
-    bac_log_kv("app.sidebar", realtime_mode=realtime_mode)
+    bac_debug_kv("app.sidebar", realtime_mode=realtime_mode)
 
     # The history controls are mode-specific so the user sees only relevant options.
     if realtime_mode:
@@ -217,7 +222,7 @@ with st.sidebar:
             value=3,
             help="Sentiment is initially validated on short, news-sensitive horizons.",
         )
-    bac_log_kv(
+    bac_debug_kv(
         "app.sidebar",
         period=period,
         interval=interval,
@@ -252,7 +257,7 @@ with st.sidebar:
         width="stretch",
     )
     active_view = active_view or "Overview"
-    bac_log_kv("app.sidebar", active_view=active_view)
+    bac_debug_kv("app.sidebar", active_view=active_view)
 
 ticker_source = ticker_source or DEFAULT_TICKER_SOURCE
 if ticker_source == MANUAL_SOURCE:
@@ -261,7 +266,7 @@ if ticker_source == MANUAL_SOURCE:
     price_prefix, price_format, price_axis_label = manual_market_preset.price_display()
 else:
     price_prefix, price_format, price_axis_label = resolve_price_display(ticker_source)
-bac_log_kv(
+bac_debug_kv(
     "app.display",
     ticker_source=ticker_source,
     manual_market=manual_market_label if ticker_source == MANUAL_SOURCE else None,
@@ -298,13 +303,13 @@ else:
         ]
     )
 
-bac_log_kv(
+bac_debug_kv(
     "app.tickers",
     detected_rows=len(detected_performers),
     ticker_count=len(tickers),
     manual_market=manual_market_label if ticker_source == MANUAL_SOURCE else None,
 )
-bac_log_list_preview("app.tickers", "resolved_tickers", tickers)
+bac_debug_list_preview("app.tickers", "resolved_tickers", tickers)
 
 if realtime_mode:
     if live_updates_enabled:

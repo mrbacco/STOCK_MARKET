@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from app_logging import bac_debug_kv, bac_debug_list_preview, bac_debug_section
 
 
 @dataclass(frozen=True)
@@ -359,14 +359,14 @@ _MANUAL_MARKET_BY_LABEL = {preset.label: preset for preset in MANUAL_MARKET_PRES
 def manual_market_labels() -> tuple[str, ...]:
     """Return the sidebar market choices in their intended display order."""
     labels = tuple(preset.label for preset in MANUAL_MARKET_PRESETS)
-    bac_log_list_preview("ticker_catalog.manual_market_labels", "labels", list(labels))
+    bac_debug_list_preview("ticker_catalog.manual_market_labels", "labels", list(labels))
     return labels
 
 
 def get_manual_market_preset(label: str | None) -> ManualMarketPreset:
     """Resolve a market label and safely fall back to the default preset."""
     preset = _MANUAL_MARKET_BY_LABEL.get(label or "", MANUAL_MARKET_PRESETS[0])
-    bac_log_kv(
+    bac_debug_kv(
         "ticker_catalog.get_manual_market_preset",
         requested_label=label,
         resolved_label=preset.label,
@@ -383,13 +383,13 @@ def initialize_manual_market_state(session_state: Any) -> None:
     try:
         if session_state.get("manual_market") not in _MANUAL_MARKET_BY_LABEL:
             session_state["manual_market"] = DEFAULT_MANUAL_MARKET
-            bac_log_section(
+            bac_debug_section(
                 "ticker_catalog.initialize_manual_market_state",
                 "Manual market state reset to the default.",
             )
     except Exception as ex:
         # This mirrors the defensive session-state behavior in `app_config.py`.
-        bac_log_kv(
+        bac_debug_kv(
             "ticker_catalog.initialize_manual_market_state",
             session_state_error=str(ex),
         )
@@ -399,7 +399,7 @@ def format_manual_ticker_option(ticker: str, preset: ManualMarketPreset) -> str:
     """Show a friendly company name while retaining the ticker as the value."""
     company = preset.company_name(ticker)
     formatted = f"{company} ({ticker})" if company != ticker.upper() else ticker.upper()
-    bac_log_kv(
+    bac_debug_kv(
         "ticker_catalog.format_manual_ticker_option",
         ticker=ticker,
         company=company,
@@ -421,12 +421,12 @@ def normalize_manual_tickers(
     currencies, and other special Yahoo symbols are preserved.
     """
     selected_list = [str(value) for value in selected_values]
-    bac_log_list_preview(
+    bac_debug_list_preview(
         "ticker_catalog.normalize_manual_tickers",
         "selected_values",
         selected_list,
     )
-    bac_log_kv(
+    bac_debug_kv(
         "ticker_catalog.normalize_manual_tickers",
         market=preset.label,
         suffix=preset.yahoo_suffix,
@@ -461,18 +461,18 @@ def normalize_manual_tickers(
             seen.add(ticker)
             normalized.append(ticker)
             if len(normalized) >= max_tickers:
-                bac_log_section(
+                bac_debug_section(
                     "ticker_catalog.normalize_manual_tickers",
                     "Manual ticker limit reached; remaining selections were ignored.",
                 )
-                bac_log_list_preview(
+                bac_debug_list_preview(
                     "ticker_catalog.normalize_manual_tickers",
                     "normalized_tickers",
                     normalized,
                 )
                 return normalized
 
-    bac_log_list_preview(
+    bac_debug_list_preview(
         "ticker_catalog.normalize_manual_tickers",
         "normalized_tickers",
         normalized,

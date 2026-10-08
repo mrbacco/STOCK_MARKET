@@ -40,7 +40,7 @@ from typing import Any, TypeVar
 
 import pandas as pd
 
-from app_logging import bac_log_kv, bac_log_section
+from app_logging import bac_debug_kv, bac_log_kv, bac_log_section
 from runtime_config import CACHE_NAMESPACE, REDIS_URL
 
 T = TypeVar("T")
@@ -287,11 +287,11 @@ def shared_cache_get_or_compute(
             raise SharedCacheMiss(f"Shared cache is unavailable for {namespace}.") from ex
         return compute()
     if payload is not None:
-        bac_log_kv("cache.shared", namespace=namespace, status="hit")
+        bac_debug_kv("cache.shared", namespace=namespace, status="hit")
         return pickle.loads(zlib.decompress(payload))
 
     if not allow_compute:
-        bac_log_kv("cache.shared", namespace=namespace, status="read_only_miss")
+        bac_debug_kv("cache.shared", namespace=namespace, status="read_only_miss")
         raise SharedCacheMiss(f"The analytics worker has not prepared {namespace} yet.")
 
     lock = client.lock(
@@ -313,7 +313,7 @@ def shared_cache_get_or_compute(
             bac_log_kv("cache.redis", namespace=namespace, status="recheck_failed", error=str(ex))
             payload = None
         if payload is not None:
-            bac_log_kv("cache.shared", namespace=namespace, status="hit_after_wait")
+            bac_debug_kv("cache.shared", namespace=namespace, status="hit_after_wait")
             return pickle.loads(zlib.decompress(payload))
 
         result = compute()
@@ -323,7 +323,7 @@ def shared_cache_get_or_compute(
         )
         try:
             client.setex(cache_key, max(int(ttl_seconds), 1), serialized)
-            bac_log_kv(
+            bac_debug_kv(
                 "cache.shared",
                 namespace=namespace,
                 status="stored",

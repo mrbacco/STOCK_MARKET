@@ -40,7 +40,13 @@ from app_config import (
     SENTIMENT_FEATURE_COLUMNS,
     resolve_market_calendar,
 )
-from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from app_logging import (
+    bac_debug_kv,
+    bac_debug_section,
+    bac_log_kv,
+    bac_log_list_preview,
+    bac_log_section,
+)
 from cache_control import cached_result
 from runtime_config import ANALYTICS_READ_ONLY
 from forecasting import build_feature_frame, prepare_model_history
@@ -147,7 +153,7 @@ def build_market_panel(
     sentiment_by_ticker: Mapping[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Create the leakage-safe pooled feature and target table."""
-    bac_log_kv(
+    bac_debug_kv(
         "market_model.build_market_panel",
         ticker_count=len(price_data),
         forecast_horizon=forecast_horizon,
@@ -167,7 +173,7 @@ def build_market_panel(
             ticker_frames.append(frame)
 
     if not ticker_frames:
-        bac_log_section("market_model.build_market_panel", "No usable ticker histories were found.")
+        bac_debug_section("market_model.build_market_panel", "No usable ticker histories were found.")
         return pd.DataFrame()
 
     panel = pd.concat(ticker_frames, ignore_index=True)
@@ -242,7 +248,7 @@ def build_market_panel(
     panel["target_outperformed"] = panel["target_excess_log_return"].gt(0).astype(int)
     panel = panel.replace([np.inf, -np.inf], np.nan)
 
-    bac_log_kv(
+    bac_debug_kv(
         "market_model.build_market_panel",
         panel_rows=len(panel),
         panel_dates=panel["Date"].nunique(),
@@ -268,7 +274,7 @@ def split_panel_dates(
     pre_evaluation_end = evaluation_start - forecast_horizon
 
     if base_end < PANEL_MIN_BASE_TRAINING_DATES or tuning_start < 0:
-        bac_log_kv(
+        bac_debug_kv(
             "market_model.split_panel_dates",
             status="insufficient_dates",
             available_dates=len(dates),
@@ -283,7 +289,7 @@ def split_panel_dates(
         "pre_evaluation": dates[:pre_evaluation_end],
         "evaluation": dates[evaluation_start:],
     }
-    bac_log_kv(
+    bac_debug_kv(
         "market_model.split_panel_dates",
         base_dates=len(split["base"]),
         tuning_dates=len(split["tuning"]),
@@ -311,14 +317,14 @@ def _fit_predict_regressors(
             model.fit(x_train, y_train)
             predictions[model_name] = np.asarray(model.predict(x_predict), dtype=float)
             fitted_models[model_name] = model
-            bac_log_kv(
+            bac_debug_kv(
                 "market_model.fit_regressor",
                 model=model_name,
                 training_rows=len(training_frame),
                 prediction_rows=len(prediction_frame),
             )
         except Exception as ex:
-            bac_log_kv(
+            bac_debug_kv(
                 "market_model.fit_regressor",
                 model=model_name,
                 fitting_error=str(ex),

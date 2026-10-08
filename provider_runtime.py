@@ -15,7 +15,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import TypeVar
 
-from app_logging import bac_log_kv
+from app_logging import bac_debug_kv, bac_log_kv
 from cache_control import get_redis_client
 from runtime_config import (
     PROVIDER_BACKOFF_SECONDS,
@@ -91,7 +91,7 @@ def call_provider(
             _wait_for_rate_slot(provider, minimum_interval)
             result = function()
             _LOCAL_FAILURES[provider] = 0
-            bac_log_kv(
+            bac_debug_kv(
                 "provider.call",
                 provider=provider,
                 operation=operation,
@@ -102,7 +102,7 @@ def call_provider(
         except Exception as ex:
             last_error = ex
             _LOCAL_FAILURES[provider] += 1
-            bac_log_kv(
+            bac_debug_kv(
                 "provider.call",
                 provider=provider,
                 operation=operation,

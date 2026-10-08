@@ -191,7 +191,8 @@ without synchronous computation.
    the browser tab remains active.
 6. Disable Live chart updates for manual-only operation, or click Refresh now
    to invalidate prices, rankings, and forecasts immediately.
-7. Monitor terminal logs for BAC_LOG entries.
+7. Monitor terminal logs for BAC_LOG entries. Set `LOG_LEVEL=DEBUG` for
+   per-step model, provider, and per-ticker detail (the default is `INFO`).
 
 ## Forecasting Approach
 

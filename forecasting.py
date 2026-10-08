@@ -32,7 +32,7 @@ from app_config import (
     RSI_PERIOD,
     SENTIMENT_FEATURE_COLUMNS,
 )
-from app_logging import bac_log_kv, bac_log_section
+from app_logging import bac_debug_kv, bac_debug_section, bac_log_kv
 from cache_control import cached_result
 from runtime_config import ANALYTICS_READ_ONLY
 from sentiment_features import build_sentiment_feature_frame, has_sufficient_sentiment_history
@@ -47,7 +47,7 @@ except ImportError:  # pragma: no cover - exercised only in degraded installs.
 
 def prepare_model_history(price_history: pd.DataFrame) -> pd.DataFrame:
     """Clean and standardize history before feature engineering begins."""
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.prepare_model_history",
         incoming_rows=len(price_history),
         incoming_columns=list(price_history.columns),
@@ -55,7 +55,7 @@ def prepare_model_history(price_history: pd.DataFrame) -> pd.DataFrame:
 
     required_columns = ("Date", "Open", "High", "Low", "Close", "Volume")
     if not set(required_columns).issubset(price_history.columns):
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.prepare_model_history",
             missing_columns=sorted(set(required_columns).difference(price_history.columns)),
         )
@@ -76,13 +76,13 @@ def prepare_model_history(price_history: pd.DataFrame) -> pd.DataFrame:
     history = history[history["Close"] > 0].copy()
     history["Volume"] = history["Volume"].fillna(0.0).clip(lower=0.0)
 
-    bac_log_kv("forecast.prepare_model_history", cleaned_rows=len(history))
+    bac_debug_kv("forecast.prepare_model_history", cleaned_rows=len(history))
     return history.reset_index(drop=True)
 
 
 def compute_rsi(close_series: pd.Series, window: int = RSI_PERIOD) -> pd.Series:
     """Compute a smoothed RSI signal and keep the output bounded and stable."""
-    bac_log_kv("forecast.compute_rsi", rows=len(close_series), window=window)
+    bac_debug_kv("forecast.compute_rsi", rows=len(close_series), window=window)
 
     delta = close_series.diff()
     gains = delta.clip(lower=0.0)
@@ -98,7 +98,7 @@ def compute_rsi(close_series: pd.Series, window: int = RSI_PERIOD) -> pd.Series:
     rsi = rsi.where(average_gain.ne(0), 0.0)
     rsi = rsi.mask(average_gain.eq(0) & average_loss.eq(0), 50.0)
 
-    bac_log_kv("forecast.compute_rsi", output_rows=len(rsi))
+    bac_debug_kv("forecast.compute_rsi", output_rows=len(rsi))
     return rsi.fillna(50.0)
 
 
@@ -115,13 +115,13 @@ def build_feature_frame(
         if include_sentiment
         else PRICE_FEATURE_COLUMNS
     )
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.build_feature_frame",
         history_rows=len(history),
         include_sentiment=include_sentiment,
     )
     if history.empty:
-        bac_log_section("forecast.build_feature_frame", "History was empty.")
+        bac_debug_section("forecast.build_feature_frame", "History was empty.")
         return pd.DataFrame(columns=feature_columns)
 
     close = history["Close"]
@@ -166,7 +166,7 @@ def build_feature_frame(
             market_calendar=market_calendar,
         )
         cleaned_features = pd.concat([cleaned_features, sentiment_features], axis=1)
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.build_feature_frame",
         feature_rows=len(cleaned_features),
         feature_columns=list(cleaned_features.columns),
@@ -182,7 +182,7 @@ def build_forecast_training_frame(
     market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
     """Join features and target returns into one training table for the model."""
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.build_forecast_training_frame",
         history_rows=len(price_history),
         forecast_horizon=forecast_horizon,
@@ -191,7 +191,7 @@ def build_forecast_training_frame(
 
     history = prepare_model_history(price_history)
     if history.empty or forecast_horizon < 1:
-        bac_log_section(
+        bac_debug_section(
             "forecast.build_forecast_training_frame",
             "Training frame could not be created because inputs were invalid.",
         )
@@ -220,14 +220,14 @@ def build_forecast_training_frame(
         training_frame = training_frame.iloc[-MODEL_LOOKBACK_POINTS:]
 
     if include_sentiment and not has_sufficient_sentiment_history(training_frame):
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.build_forecast_training_frame",
             message="Sentiment model is still collecting a historical baseline.",
             observed_sentiment_bars=int((training_frame["news_count_24h"] > 0).sum()),
         )
         return pd.DataFrame()
 
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.build_forecast_training_frame",
         training_rows=len(training_frame),
     )
@@ -239,9 +239,9 @@ def fit_forecast_model(
     feature_columns: tuple[str, ...] = PRICE_FEATURE_COLUMNS,
 ) -> Pipeline | None:
     """Fit a small regularized regression model on the engineered features."""
-    bac_log_kv("forecast.fit_forecast_model", training_rows=len(training_frame))
+    bac_debug_kv("forecast.fit_forecast_model", training_rows=len(training_frame))
     if len(training_frame) < MIN_MODEL_TRAINING_ROWS:
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.fit_forecast_model",
             message="Not enough rows to fit the model.",
             minimum_rows=MIN_MODEL_TRAINING_ROWS,
@@ -257,7 +257,7 @@ def fit_forecast_model(
         ]
     )
     model.fit(training_frame.loc[:, feature_columns], training_frame["target_log_return"])
-    bac_log_section("forecast.fit_forecast_model", "Model fitting completed.")
+    bac_debug_section("forecast.fit_forecast_model", "Model fitting completed.")
     return model
 
 
@@ -443,7 +443,7 @@ def forecast_feature_model(
 
     Results are cached per market scope; a failure returns an empty frame.
     """
-    bac_log_kv("forecast.forecast_feature_model", points_ahead=points_ahead, history_rows=len(price_history))
+    bac_debug_kv("forecast.forecast_feature_model", points_ahead=points_ahead, history_rows=len(price_history))
     history = prepare_model_history(price_history)
     if history.empty:
         return pd.DataFrame()
@@ -461,7 +461,7 @@ def forecast_feature_model(
     )
     latest_features = feature_frame.iloc[[-1]].replace([np.inf, -np.inf], np.nan)
     if latest_features.loc[:, feature_columns].isna().any(axis=None):
-        bac_log_section(
+        bac_debug_section(
             "forecast.forecast_feature_model",
             "Latest feature row was incomplete; no forward curve was created.",
         )
@@ -479,7 +479,7 @@ def forecast_feature_model(
         )
         model = fit_forecast_model(training_frame, feature_columns=feature_columns)
         if model is None:
-            bac_log_kv(
+            bac_debug_kv(
                 "forecast.forecast_feature_model",
                 stopping_horizon=forecast_horizon,
                 message="Stopped because the horizon model could not be fitted.",
@@ -503,7 +503,7 @@ def forecast_feature_model(
         )
 
     result = pd.DataFrame(rows)
-    bac_log_kv("forecast.forecast_feature_model", forecast_rows=len(result))
+    bac_debug_kv("forecast.forecast_feature_model", forecast_rows=len(result))
     return result
 
 
@@ -530,7 +530,7 @@ def backtest_forecast_model(
 
     Read-only web replicas serve worker-warmed results and queue cold ones.
     """
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.backtest_forecast_model",
         history_rows=len(price_history),
         forecast_horizon=forecast_horizon,
@@ -541,7 +541,7 @@ def backtest_forecast_model(
 
     history = prepare_model_history(price_history)
     if history.empty or forecast_horizon < 1:
-        bac_log_section(
+        bac_debug_section(
             "forecast.backtest_forecast_model",
             "Backtest aborted because history or horizon was invalid.",
         )
@@ -549,13 +549,13 @@ def backtest_forecast_model(
 
     available_test_points = len(history) - training_points - forecast_horizon + 1
     test_points = min(max_test_points, available_test_points)
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.backtest_forecast_model",
         available_test_points=available_test_points,
         chosen_test_points=test_points,
     )
     if test_points < MIN_BACKTEST_POINTS:
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.backtest_forecast_model",
             message="Not enough unseen samples for backtesting.",
             minimum_points=MIN_BACKTEST_POINTS,
@@ -594,7 +594,7 @@ def backtest_forecast_model(
             model is None
             or latest_features.loc[:, feature_columns].isna().any(axis=None)
         ):
-            bac_log_kv(
+            bac_debug_kv(
                 "forecast.backtest_forecast_model",
                 training_end_index=training_end_index,
                 message="Skipped one step because training or origin features were unavailable.",
@@ -623,7 +623,7 @@ def backtest_forecast_model(
             "return_residual": actual_log_return - predicted_log_return,
         }
         rows.append(row)
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.backtest_forecast_model.step",
             training_end_index=training_end_index,
             actual_close=actual_close,
@@ -639,7 +639,7 @@ def backtest_forecast_model(
     # individual steps may be skipped when sentiment or rolling features are not
     # yet available.  Never expose a statistically tiny result as a valid test.
     if len(result) < MIN_BACKTEST_POINTS:
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.backtest_forecast_model",
             message="Discarded backtest because too few predictions were realized.",
             realized_points=len(result),
@@ -647,7 +647,7 @@ def backtest_forecast_model(
         )
         return pd.DataFrame()
 
-    bac_log_kv("forecast.backtest_forecast_model", result_rows=len(result))
+    bac_debug_kv("forecast.backtest_forecast_model", result_rows=len(result))
     return result.reset_index(drop=True)
 
 
@@ -667,7 +667,7 @@ def add_forecast_intervals(
         or len(backtest) < MIN_BACKTEST_POINTS
         or last_close <= 0
     ):
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.add_forecast_intervals",
             status="unavailable",
             forecast_rows=len(result),
@@ -692,7 +692,7 @@ def add_forecast_intervals(
         result[column] = last_close * np.exp(
             predicted_log_return + residual_quantile * horizon_scale
         )
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.add_forecast_intervals",
         status="calibrated",
         residual_rows=len(residuals),
@@ -714,7 +714,7 @@ def confidence_label(mae_improvement: float, directional_accuracy: float) -> str
     else:
         label = "Low"
 
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.confidence_label",
         mae_improvement=mae_improvement,
         directional_accuracy=directional_accuracy,
@@ -725,7 +725,7 @@ def confidence_label(mae_improvement: float, directional_accuracy: float) -> str
 
 def summarize_backtest(ticker: str, backtest: pd.DataFrame, forecast_horizon: int) -> dict:
     """Summarize walk-forward results into one row for the Streamlit score table."""
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.summarize_backtest",
         ticker=ticker,
         backtest_rows=len(backtest),
@@ -744,7 +744,7 @@ def summarize_backtest(ticker: str, backtest: pd.DataFrame, forecast_horizon: in
     mae_improvement = (
         ((baseline_mae - model_mae) / baseline_mae) * 100 if baseline_mae > 0 else np.nan
     )
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.summarize_backtest",
         ticker=ticker,
         model_mae=model_mae,
@@ -765,7 +765,7 @@ def summarize_backtest(ticker: str, backtest: pd.DataFrame, forecast_horizon: in
         "MAE improvement vs. no-change": mae_improvement,
         "Confidence": confidence_label(mae_improvement, directional_accuracy),
     }
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.summarize_backtest",
         ticker=ticker,
         model_mae=model_mae,
@@ -794,7 +794,7 @@ def summarize_model_comparison(
         "Sentiment MAE lift vs. price-only": np.nan,
     }
     if sentiment_backtest.empty:
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.summarize_model_comparison",
             ticker=ticker,
             status="sentiment_backtest_empty",
@@ -816,7 +816,7 @@ def summarize_model_comparison(
     if not set(comparison_columns).issubset(price_backtest.columns) or not set(
         comparison_columns
     ).issubset(sentiment_backtest.columns):
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.summarize_model_comparison",
             ticker=ticker,
             status="missing_comparison_columns",
@@ -831,7 +831,7 @@ def summarize_model_comparison(
         validate="one_to_one",
     )
     paired = paired.sort_values("date").drop_duplicates("date", keep="last")
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.summarize_model_comparison",
         ticker=ticker,
         price_rows=len(price_backtest),
@@ -883,7 +883,7 @@ def summarize_model_comparison(
             "Paired forecasts": len(paired),
         }
     )
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.summarize_model_comparison",
         ticker=ticker,
         active_model=comparison["Active model"],
@@ -933,7 +933,7 @@ def future_projection_dates(
     market_calendar: str = "NYSE",
 ) -> pd.DatetimeIndex:
     """Generate future timestamps that line up with the selected operating mode."""
-    bac_log_kv(
+    bac_debug_kv(
         "forecast.future_projection_dates",
         last_date=str(last_date),
         points_ahead=points_ahead,
@@ -949,7 +949,7 @@ def future_projection_dates(
     # The package is deliberately optional at import time so a damaged local
     # environment still opens the app with a clearly logged degraded schedule.
     if market_calendars is None:
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.future_projection_dates",
             message="Calendar package unavailable; using weekday fallback.",
             market_calendar=market_calendar,
@@ -975,7 +975,7 @@ def future_projection_dates(
         schedule_end = schedule_start + pd.Timedelta(days=max(21, points_ahead * 3))
         schedule = calendar.schedule(start_date=schedule_start, end_date=schedule_end)
     except Exception as ex:
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.future_projection_dates",
             calendar_error=str(ex),
             market_calendar=market_calendar,
@@ -1012,7 +1012,7 @@ def future_projection_dates(
         ).tz_convert(calendar_timezone)
         future_dates = calendar_bars[calendar_bars > localized_last][:points_ahead]
         future_dates = future_dates.tz_localize(None)
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.future_projection_dates",
             projection_mode="exchange_intraday",
             frequency=frequency,
@@ -1025,11 +1025,11 @@ def future_projection_dates(
         future_dates = session_dates[session_dates > last_timestamp.normalize()][
             :points_ahead
         ]
-        bac_log_kv(
+        bac_debug_kv(
             "forecast.future_projection_dates",
             projection_mode="exchange_sessions",
             generated_points=len(future_dates),
         )
 
-    bac_log_kv("forecast.future_projection_dates", generated_points=len(future_dates))
+    bac_debug_kv("forecast.future_projection_dates", generated_points=len(future_dates))
     return future_dates

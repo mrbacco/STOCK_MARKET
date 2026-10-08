@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app_logging import bac_log_kv
+from app_logging import bac_debug_kv
 from database import database_connection
 
 
@@ -98,7 +98,7 @@ def save_price_history_snapshot(
     """Atomically replace one ticker/period/interval last-known-good snapshot."""
     required = set(SNAPSHOT_REQUIRED_COLUMNS)
     if history.empty or not required.issubset(history.columns):
-        bac_log_kv(
+        bac_debug_kv(
             "market_snapshot.save",
             ticker=ticker,
             period=period,
@@ -161,7 +161,7 @@ def save_price_history_snapshot(
             rows,
         )
 
-    bac_log_kv(
+    bac_debug_kv(
         "market_snapshot.save",
         ticker=normalized_ticker,
         period=period,
@@ -197,7 +197,7 @@ def load_price_history_snapshot(
         ).fetchall()
 
     if not rows:
-        bac_log_kv(
+        bac_debug_kv(
             "market_snapshot.load",
             ticker=normalized_ticker,
             period=period,
@@ -224,7 +224,7 @@ def load_price_history_snapshot(
     frame.attrs["bac_data_status"] = "last_known_good"
     frame.attrs["bac_fetched_at"] = fetched_at
     frame.attrs["bac_latest_bar"] = str(frame["Date"].iloc[-1])
-    bac_log_kv(
+    bac_debug_kv(
         "market_snapshot.load",
         ticker=normalized_ticker,
         period=period,

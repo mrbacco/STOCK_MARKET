@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app_logging import bac_log_kv
+from app_logging import bac_debug_kv
 
 US_SCREENER_QUERY = "day_gainers"
 # Automatic markets now keep a wider candidate pool for the cross-sectional
@@ -181,7 +181,7 @@ def resolve_market_calendar(ticker_source: str | None, ticker: str = "") -> str:
             "NYSE",
         )
 
-    bac_log_kv(
+    bac_debug_kv(
         "app_config.resolve_market_calendar",
         ticker_source=ticker_source,
         ticker=ticker,
@@ -269,7 +269,7 @@ def initialize_session_defaults(session_state: Any) -> None:
     area that the app needs: `.get(...)` and item assignment.
     """
     if session_state is None or not hasattr(session_state, "get"):
-        bac_log_kv(
+        bac_debug_kv(
             "app_config.initialize_session_defaults",
             session_state_available=False,
         )
@@ -282,7 +282,7 @@ def initialize_session_defaults(session_state: Any) -> None:
             session_state["ticker_source"] = DEFAULT_TICKER_SOURCE
         if session_state.get("active_view") not in VIEW_OPTIONS:
             session_state["active_view"] = DEFAULT_VIEW
-        bac_log_kv(
+        bac_debug_kv(
             "app_config.initialize_session_defaults",
             ticker_source_before=ticker_source_before,
             ticker_source_after=session_state.get("ticker_source"),
@@ -293,7 +293,7 @@ def initialize_session_defaults(session_state: Any) -> None:
         # In bare Python execution or other non-Streamlit contexts, session
         # state may not behave like the normal runtime proxy. Silently skip so
         # the app can still be imported or statically checked.
-        bac_log_kv(
+        bac_debug_kv(
             "app_config.initialize_session_defaults",
             message="Session defaults could not be applied outside Streamlit runtime.",
         )
@@ -305,14 +305,14 @@ def resolve_price_display(ticker_source: str) -> tuple[str, str, str]:
     euro_symbol = "\u20ac"
     if ticker_source in {IRELAND_SOURCE, FTSE_MIB_SOURCE}:
         display = (euro_symbol, f"{euro_symbol}%.2f", "Price (EUR)")
-        bac_log_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
+        bac_debug_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
         return display
     if ticker_source == US_SOURCE:
         display = ("$", "$%.2f", "Price (USD)")
-        bac_log_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
+        bac_debug_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
         return display
     display = ("", "%.2f", "Price (listing currency)")
-    bac_log_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
+    bac_debug_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
     return display
 
 
@@ -320,7 +320,7 @@ def selected_horizon_label(realtime_mode: bool, interval: str, forecast_points: 
     """Translate the numeric horizon into a label that reads naturally in the UI."""
     if realtime_mode:
         label = f"{forecast_points} {interval} bars"
-        bac_log_kv(
+        bac_debug_kv(
             "app_config.selected_horizon_label",
             realtime_mode=realtime_mode,
             interval=interval,
@@ -329,7 +329,7 @@ def selected_horizon_label(realtime_mode: bool, interval: str, forecast_points: 
         )
         return label
     label = f"{forecast_points} business days"
-    bac_log_kv(
+    bac_debug_kv(
         "app_config.selected_horizon_label",
         realtime_mode=realtime_mode,
         interval=interval,

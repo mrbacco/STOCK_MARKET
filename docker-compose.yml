@@ -4,6 +4,7 @@ x-runtime-environment: &runtime-environment
   DATABASE_URL: postgresql://${POSTGRES_USER:-stock_market}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-stock_market}
   REDIS_URL: redis://redis:6379/0
   CACHE_NAMESPACE: stock-market
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
   RUN_IN_PROCESS_SENTIMENT: "false"
   ANALYTICS_PERIODS: ${ANALYTICS_PERIODS:-1y}
   ANALYTICS_HORIZONS: ${ANALYTICS_HORIZONS:-1,3,5}

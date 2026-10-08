@@ -32,7 +32,7 @@ from app_config import (
     resolve_market_calendar,
     selected_horizon_label,
 )
-from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
+from app_logging import bac_debug_kv, bac_log_kv, bac_log_list_preview, bac_log_section
 from cache_control import set_cache_scope
 from forecasting import (
     add_forecast_intervals,
@@ -79,7 +79,7 @@ def _volatility_regime(price_history: pd.DataFrame) -> str:
     lower_quartile = float(rolling_volatility.quantile(0.25))
     upper_quartile = float(rolling_volatility.quantile(0.75))
     regime = "High volatility" if latest >= upper_quartile else "Low volatility" if latest <= lower_quartile else "Normal volatility"
-    bac_log_kv(
+    bac_debug_kv(
         "views.volatility_regime",
         latest=latest,
         lower_quartile=lower_quartile,
@@ -128,7 +128,7 @@ def prepare_realtime_forecast_history(
         status = "completed_bucket"
 
     completed_history.attrs.update(price_history.attrs)
-    bac_log_kv(
+    bac_debug_kv(
         "views.realtime_model_input",
         status=status,
         live_rows=len(price_history),
@@ -244,7 +244,7 @@ def render_overview_view(
                 current_price = float(price_series.iloc[-1])
                 previous_price = float(price_series.iloc[-2])
                 delta_value = current_price - previous_price
-                bac_log_kv(
+                bac_debug_kv(
                     "views.render_overview_view.quote",
                     ticker=ticker,
                     current_price=current_price,
@@ -257,7 +257,7 @@ def render_overview_view(
                     f"{price_prefix}{delta_value:+.2f} vs. prior bar",
                 )
             else:
-                bac_log_kv(
+                bac_debug_kv(
                     "views.render_overview_view.quote",
                     ticker=ticker,
                     message="Skipped metric because fewer than two close values were available.",
@@ -646,7 +646,7 @@ def render_charts_view(
                 current_price = float(price_series.iloc[-1])
                 previous_price = float(price_series.iloc[-2])
                 delta_value = current_price - previous_price
-                bac_log_kv(
+                bac_debug_kv(
                     "views.render_charts_view.quote",
                     ticker=ticker,
                     current_price=current_price,
@@ -659,7 +659,7 @@ def render_charts_view(
                     f"{price_prefix}{delta_value:+.2f} vs. prior bar",
                 )
             else:
-                bac_log_kv(
+                bac_debug_kv(
                     "views.render_charts_view.quote",
                     ticker=ticker,
                     message="Skipped realtime metric because fewer than two close values were available.",
@@ -699,7 +699,7 @@ def render_charts_view(
             "last_known_good",
             "provider_stale",
         }
-        bac_log_kv(
+        bac_debug_kv(
             "views.render_charts_view.ticker",
             ticker=ticker,
             price_rows=len(df),
@@ -813,7 +813,7 @@ def render_charts_view(
                     returned_points=len(fc),
                     status="ready",
                 )
-        bac_log_kv(
+        bac_debug_kv(
             "views.render_charts_view.ticker",
             ticker=ticker,
             forecast_rows=len(fc),
@@ -937,7 +937,7 @@ def render_charts_view(
                 if using_stale_data:
                     # Showing a clearly labelled recovery forecast is useful;
                     # recording it as a new live production prediction is not.
-                    bac_log_kv(
+                    bac_debug_kv(
                         "views.render_charts_view.ticker",
                         ticker=ticker,
                         status="stale_forecast_not_recorded",
@@ -1005,7 +1005,7 @@ def render_charts_view(
                 if pd.notna(mae_improvement)
                 else "MAE comparison unavailable"
             )
-            bac_log_kv(
+            bac_debug_kv(
                 "views.render_charts_view.caption",
                 ticker=ticker,
                 current_return_pct=current_return_pct,
