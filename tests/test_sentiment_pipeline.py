@@ -23,7 +23,7 @@ from forecasting import (
 )
 from sentiment_analysis import SentimentScore, normalize_finbert_scores
 from sentiment_features import build_sentiment_feature_frame
-from sentiment_store import load_sentiment_history, save_news_sentiment
+from sentiment_store import load_sentiment_history, save_news_sentiment, update_watchlist
 
 
 def _news_row(first_seen_at: str = "2026-01-03T14:00:00Z") -> dict:
@@ -71,6 +71,17 @@ class SentimentPipelineTest(unittest.TestCase):
             self.assertEqual(1, len(stored))
             self.assertEqual(pd.Timestamp("2026-01-03 14:00:00"), stored["first_seen_at"].iloc[0])
             self.assertAlmostEqual(0.5, stored["sentiment"].iloc[0])
+
+    def test_watchlist_reports_only_newly_active_tickers(self) -> None:
+        """Reruns with an unchanged watchlist must not wake the collector."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "sentiment.db"
+            self.assertTrue(update_watchlist({"AAA": "A plc"}, db_path=database))
+            self.assertFalse(update_watchlist({"AAA": "A plc"}, db_path=database))
+            self.assertTrue(
+                update_watchlist({"AAA": "A plc", "BBB": "B plc"}, db_path=database)
+            )
+            self.assertFalse(update_watchlist({}, db_path=database))
 
     def test_collection_deduplicates_before_scoring(self) -> None:
         candidate = {

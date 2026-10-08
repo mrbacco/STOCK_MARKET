@@ -46,6 +46,7 @@ from provider_runtime import call_provider
 from runtime_config import (
     MARKETSTACK_API_KEY,
     MARKETSTACK_BASE_URL,
+    MARKETSTACK_MIN_INTERVAL_SECONDS,
     MARKET_DATA_LICENSE_CONFIRMED,
     MARKET_DATA_PROVIDER,
     RUN_IN_PROCESS_SENTIMENT,
@@ -321,7 +322,7 @@ def _fetch_single_price_history_from_provider(
                 api_key=MARKETSTACK_API_KEY,
                 base_url=MARKETSTACK_BASE_URL,
             ),
-            minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
+            minimum_interval=MARKETSTACK_MIN_INTERVAL_SECONDS,
         )
         return (
             _mark_live_price_history(history, provider="marketstack")

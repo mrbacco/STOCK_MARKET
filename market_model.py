@@ -363,14 +363,30 @@ def _weighted_prediction(
     predictions: Mapping[str, np.ndarray],
     weights: Mapping[str, float],
 ) -> np.ndarray:
-    """Blend model vectors using only weights learned on the tuning period."""
-    if not predictions or not weights:
+    """Blend model vectors using only weights learned on the tuning period.
+
+    A member that fitted during tuning can still fail on a later window. Its
+    weight is then dropped and the remaining weights are rescaled to sum to
+    one, so a partial ensemble is not silently shrunk towards zero.
+    """
+    available_weights = {
+        model_name: float(weights.get(model_name, 0.0))
+        for model_name in predictions
+        if float(weights.get(model_name, 0.0)) > 0.0
+    }
+    total_weight = sum(available_weights.values())
+    if total_weight <= 0.0:
         return np.array([], dtype=float)
     first = next(iter(predictions.values()))
     blended = np.zeros(len(first), dtype=float)
-    for model_name, values in predictions.items():
-        blended += values * float(weights.get(model_name, 0.0))
+    for model_name, weight in available_weights.items():
+        blended += predictions[model_name] * (weight / total_weight)
     return blended
+
+
+def _empty_ranking_result() -> dict[str, object]:
+    """Return the shape callers expect when no ranking can be produced."""
+    return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
 
 
 def _fit_probability_pipeline(
@@ -458,7 +474,7 @@ def _compute_rank_market_candidates(
     bac_log_section("market_model.rank_market_candidates", "Pooled ranking started.")
     panel = build_market_panel(price_data, forecast_horizon, sentiment_by_ticker)
     if panel.empty:
-        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
+        return _empty_ranking_result()
 
     labeled = panel.dropna(
         subset=[*PANEL_FEATURE_COLUMNS, "target_excess_log_return"]
@@ -478,7 +494,7 @@ def _compute_rank_market_candidates(
             labeled_rows=len(labeled),
             latest_rows=len(latest),
         )
-        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
+        return _empty_ranking_result()
 
     by_dates = lambda dates: labeled[labeled["Date"].isin(dates)].copy()
     base_frame = by_dates(split["base"])
@@ -492,7 +508,7 @@ def _compute_rank_market_candidates(
         tuning_predictions,
     )
     if not weights:
-        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
+        return _empty_ranking_result()
 
     # Final metrics come from a later untouched block, with a horizon-length gap
     # between its first origin and the preceding training origins.
@@ -501,6 +517,13 @@ def _compute_rank_market_candidates(
         evaluation_frame,
     )
     evaluation_blend = _weighted_prediction(evaluation_predictions, weights)
+    if evaluation_blend.size == 0:
+        bac_log_kv(
+            "market_model.rank_market_candidates",
+            status="no_evaluation_models",
+            evaluation_rows=len(evaluation_frame),
+        )
+        return _empty_ranking_result()
 
     # Tuning residuals define finite-sample 50% and 80% prediction intervals.
     # Because those residuals precede evaluation, interval coverage is measured
@@ -534,6 +557,13 @@ def _compute_rank_market_candidates(
 
     latest_predictions, _ = _fit_predict_regressors(labeled, latest)
     latest_blend = _weighted_prediction(latest_predictions, weights)
+    if latest_blend.size == 0:
+        bac_log_kv(
+            "market_model.rank_market_candidates",
+            status="no_latest_models",
+            latest_rows=len(latest),
+        )
+        return _empty_ranking_result()
     component_matrix = np.column_stack(list(latest_predictions.values()))
     latest_agreement_spread = np.std(component_matrix, axis=1)
 
@@ -702,7 +732,7 @@ def rank_market_candidates(
             (price_data, forecast_horizon, sentiment_by_ticker, top_n),
         )
         bac_log_kv("market_model.rank_market_candidates", status="worker_queued", error=str(ex))
-        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
+        return _empty_ranking_result()
     except Exception as ex:
         # The pooled ranking is an enhancement over the per-ticker forecast
         # curves. Keep those curves available if a cross-sectional estimator or
@@ -715,4 +745,4 @@ def rank_market_candidates(
             candidate_tickers=len(price_data),
             forecast_horizon=forecast_horizon,
         )
-        return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
+        return _empty_ranking_result()

@@ -356,17 +356,23 @@ company_by_ticker = (
     if not detected_performers.empty and "Company" in detected_performers.columns
     else {ticker: ticker for ticker in tickers}
 )
-update_watchlist({ticker: company_by_ticker.get(ticker, ticker) for ticker in tickers})
-if sentiment_collector is not None and hasattr(sentiment_collector, "request_collection"):
-    sentiment_collector.request_collection()
-else:
-    # Streamlit's offline AppTest harness replaces the cached background
-    # resource with `None`.  The app remains renderable in that deterministic
-    # environment while normal runtime processes still wake the real daemon.
-    bac_log_section(
-        "app.sentiment_collector",
-        "Immediate wake-up unavailable in this runtime.",
-    )
+watchlist_changed = update_watchlist(
+    {ticker: company_by_ticker.get(ticker, ticker) for ticker in tickers}
+)
+# Every widget interaction reruns this script. Waking the collector only for
+# newly tracked tickers prevents each click from starting a full RSS + FinBERT
+# cycle; unchanged watchlists are picked up by the regular five-minute cadence.
+if watchlist_changed:
+    if sentiment_collector is not None and hasattr(sentiment_collector, "request_collection"):
+        sentiment_collector.request_collection()
+    else:
+        # Streamlit's offline AppTest harness replaces the cached background
+        # resource with `None`.  The app remains renderable in that deterministic
+        # environment while normal runtime processes still wake the real daemon.
+        bac_log_section(
+            "app.sentiment_collector",
+            "Immediate wake-up unavailable in this runtime.",
+        )
 collector_status = get_collector_status()
 collector_mode = (
     "in-process every 5 minutes"

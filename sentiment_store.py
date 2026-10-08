@@ -94,8 +94,12 @@ def update_watchlist(
     company_by_ticker: Mapping[str, str],
     db_path: str | Path | None = None,
     max_tickers: int = SENTIMENT_MAX_WATCHLIST,
-) -> None:
-    """Add or refresh tickers and retain the most recently used bounded set."""
+) -> bool:
+    """Add or refresh tickers and retain the most recently used bounded set.
+
+    Returns True when at least one ticker was not already active, so callers
+    can wake the collector only when there is genuinely new work.
+    """
     initialize_sentiment_store(db_path)
     updated_at = _utc_iso()
     clean_items = [
@@ -104,9 +108,22 @@ def update_watchlist(
         if str(ticker).strip()
     ]
     if not clean_items:
-        return
+        return False
 
+    requested_tickers = [ticker for ticker, _company, _updated_at in clean_items]
+    placeholders = ",".join("?" for _ in requested_tickers)
     with _connect(db_path) as connection:
+        already_active = {
+            str(row["ticker"])
+            for row in connection.execute(
+                f"""
+                SELECT ticker
+                FROM sentiment_watchlist
+                WHERE active = 1 AND ticker IN ({placeholders})
+                """,
+                requested_tickers,
+            ).fetchall()
+        }
         connection.executemany(
             """
             INSERT INTO sentiment_watchlist (ticker, company_name, active, updated_at)
@@ -131,7 +148,14 @@ def update_watchlist(
             """,
             (max_tickers,),
         )
-    bac_log_kv("sentiment.store.watchlist", refreshed=len(clean_items), max_tickers=max_tickers)
+    newly_active = sorted(set(requested_tickers) - already_active)
+    bac_log_kv(
+        "sentiment.store.watchlist",
+        refreshed=len(clean_items),
+        newly_active=len(newly_active),
+        max_tickers=max_tickers,
+    )
+    return bool(newly_active)
 
 
 def load_active_watchlist(db_path: str | Path | None = None) -> dict[str, str]:

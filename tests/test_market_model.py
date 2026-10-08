@@ -13,7 +13,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from market_model import rank_market_candidates, split_panel_dates
+from market_model import _weighted_prediction, rank_market_candidates, split_panel_dates
 
 
 def _synthetic_market(ticker_count: int = 6, periods: int = 150) -> dict[str, pd.DataFrame]:
@@ -83,6 +83,21 @@ class MarketModelTest(unittest.TestCase):
         self.assertTrue(ranking["Probability outperform"].between(0, 100).all())
         self.assertAlmostEqual(1.0, sum(diagnostics["Model weights"].values()), places=6)
         self.assertGreaterEqual(diagnostics["Evaluation dates"], 20)
+
+
+    def test_blend_rescales_weights_when_a_member_is_missing(self) -> None:
+        """A model that fails after tuning must not shrink the blend towards zero."""
+        weights = {"Ridge": 0.5, "Elastic Net": 0.3, "Histogram gradient boosting": 0.2}
+        predictions = {
+            "Ridge": np.array([0.02, -0.01]),
+            "Elastic Net": np.array([0.04, 0.01]),
+        }
+
+        blended = _weighted_prediction(predictions, weights)
+
+        expected = (0.5 * predictions["Ridge"] + 0.3 * predictions["Elastic Net"]) / 0.8
+        np.testing.assert_allclose(expected, blended)
+        self.assertEqual(0, _weighted_prediction({}, weights).size)
 
 
 if __name__ == "__main__":
