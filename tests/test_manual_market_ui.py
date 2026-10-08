@@ -12,6 +12,7 @@ import unittest
 
 import pandas as pd
 
+import chart_pipeline
 import market_data
 import sentiment_service
 import sentiment_store
@@ -64,6 +65,7 @@ class ManualMarketUiTest(unittest.TestCase):
         cls.original_us_loader = market_data.get_us_top_performers
         cls.original_history_loader = market_data.get_price_history_batch
         cls.original_views_history_loader = views.get_price_history_batch
+        cls.original_pipeline_history_loader = chart_pipeline.get_price_history_batch
         cls.original_background_collector = sentiment_service.ensure_background_sentiment_collector
         cls.original_watchlist_updater = sentiment_store.update_watchlist
         cls.original_collector_status = sentiment_store.get_collector_status
@@ -89,6 +91,7 @@ class ManualMarketUiTest(unittest.TestCase):
         # well. This keeps fragment/UI tests deterministic regardless of module
         # import order in the full suite.
         views.get_price_history_batch = market_data.get_price_history_batch
+        chart_pipeline.get_price_history_batch = market_data.get_price_history_batch
         sentiment_service.ensure_background_sentiment_collector = lambda: None
         sentiment_store.update_watchlist = lambda company_by_ticker: None
         sentiment_store.get_collector_status = lambda: {
@@ -106,6 +109,7 @@ class ManualMarketUiTest(unittest.TestCase):
         market_data.get_us_top_performers = cls.original_us_loader
         market_data.get_price_history_batch = cls.original_history_loader
         views.get_price_history_batch = cls.original_views_history_loader
+        chart_pipeline.get_price_history_batch = cls.original_pipeline_history_loader
         sentiment_service.ensure_background_sentiment_collector = cls.original_background_collector
         sentiment_store.update_watchlist = cls.original_watchlist_updater
         sentiment_store.get_collector_status = cls.original_collector_status

@@ -59,23 +59,25 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 - app.py: Main Streamlit entry point and sidebar workflow.
 - app_config.py: Shared constants and runtime configuration.
-- app_logging.py: Terminal logging and BAC_LOG helpers.
+- app_logging.py: BAC_LOG helpers on top of the standard logging module (`LOG_LEVEL`).
+- market_sources.py: Registry of the automatic Ireland, Italy, and U.S. sources (loader, calendar, currency, and copy).
 - ticker_catalog.py: Geographical market presets, ticker examples, suffix rules, and currency labels.
 - market_data.py: Price, screener, news, and sentiment data loading.
 - forecasting.py: Feature engineering, forecasts, and walk-forward backtests.
+- chart_pipeline.py: Streamlit-free Charts pipeline: price loading, ranking, ticker forecasts, and monitoring records.
 - market_model.py: Pooled contextual ensemble, probabilities, intervals, and automatic top-10 ranking.
 - model_monitoring.py: Persistent forecast outcomes, rolling production metrics, and drift snapshots.
 - sentiment_analysis.py: Cached FinBERT scoring and VADER fallback.
 - sentiment_features.py: Leakage-safe, point-in-time sentiment aggregates.
 - sentiment_service.py: RSS ingestion and the in-process background collector.
 - database.py: PostgreSQL/SQLite DB-API compatibility layer.
-- cache_control.py: Redis result caching, cache generations, and stampede locks.
+- cache_control.py: `cached_result` decorator (in-process L1, Redis L2), stable cache keys, cache generations, and stampede locks.
 - provider_runtime.py: provider rate limiting, retry/backoff, and circuit breaking.
 - runtime_config.py: environment-backed local and production runtime settings.
 - sentiment_store.py: portable schema, watchlist, news history, and collector status.
 - sentiment_worker.py: Standalone continuous collector for 24/7 operation.
 - analytics_worker.py: Standalone market-ranking and backtest precomputation worker.
-- views.py: Overview, Charts, and News rendering.
+- views.py: Overview, Charts, and News rendering only.
 - tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
 - tests/test_market_leader_rankings.py: Offline ranking and ten-ticker-cap tests for automatic market sources.
 - tests/test_sentiment_pipeline.py: Offline persistence, leakage, feature, and promotion tests.
@@ -83,7 +85,12 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - tests/test_forecast_calendar.py: Exchange-session and holiday projection tests.
 - tests/test_model_monitoring.py: Forecast-resolution and drift-monitoring tests.
 - tests/test_prediction_ranking_ui.py: Offline Streamlit proof that the model-ranked top ten charts render automatically.
-- requirements.txt: Python dependencies.
+- tests/test_chart_pipeline.py: Streamlit-free Charts pipeline tests.
+- tests/test_market_sources.py: Market-source registry consistency tests.
+- tests/test_scalability_runtime.py: Cache-key, cache-decorator, database-pool, and provider-runtime tests.
+- tests/test_app_logging.py: Log-level tests.
+- requirements.txt: Direct Python dependencies.
+- requirements.lock: Pinned Linux dependency set for Docker and CI.
 - README.md: Project documentation.
 - LICENSE: MIT license.
 

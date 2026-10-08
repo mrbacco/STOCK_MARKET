@@ -6,9 +6,11 @@
 
 """Streamlit view-rendering helpers.
 
-Each function in this module is responsible for one high-level page view. The
+Each public function in this module renders one high-level page view. The
 main app script chooses which view to render based on sidebar state and passes
-the already-selected data context into these helpers.
+the already-selected data context into these helpers. Data loading, model
+fitting, and monitoring writes for the Charts view live in `chart_pipeline`;
+this module only decides how their results are displayed.
 """
 
 from __future__ import annotations
@@ -29,116 +31,32 @@ from app_config import (
 )
 from app_logging import bac_debug_kv, bac_log_kv, bac_log_list_preview, bac_log_section
 from cache_control import set_cache_scope
-from forecasting import (
-    add_forecast_intervals,
-    backtest_forecast_model,
-    diagnose_forecast_readiness,
-    forecast_feature_model,
-    future_projection_dates,
-    summarize_model_comparison,
+from chart_pipeline import (
+    REALTIME_MODEL_REFRESH_FREQUENCY,
+    MarketRankingResult,
+    TickerForecast,
+    build_ticker_forecast,
+    load_chart_prices,
+    rank_live_candidates,
+    record_displayed_forecast,
+    resolve_matured_forecasts,
+    select_charted_tickers,
 )
-from market_model import rank_market_candidates
-from market_sources import MANUAL_CHART_HEADING, get_market_source, resolve_market_calendar
 from market_data import (
+    PriceDataHealth,
     classify_price_histories,
     company_names_by_ticker,
     get_price_history_batch,
     growth_score,
     load_news_frames_parallel,
-    momentum_label,
 )
+from market_sources import MANUAL_CHART_HEADING, MarketSource, get_market_source
 from model_monitoring import (
     latest_drift_summary,
     load_forecast_quality,
     load_market_model_history,
-    record_forecast,
-    record_market_model_run,
-    resolve_pending_forecasts,
 )
-from sentiment_store import load_sentiment_history
 from runtime_config import ANALYTICS_READ_ONLY, LIVE_CHART_REFRESH_SECONDS
-
-
-# Live prices can change each minute, but refitting and walk-forward testing
-# every model on each poll would create unnecessary CPU load. The model uses
-# only bars before the currently active five-minute bucket; the solid observed
-# line still displays every price bar returned by the provider.
-REALTIME_MODEL_REFRESH_FREQUENCY = "5min"
-
-
-def _volatility_regime(price_history: pd.DataFrame) -> str:
-    """Classify the latest realized volatility relative to the ticker's history."""
-    close = pd.to_numeric(price_history.get("Close"), errors="coerce")
-    rolling_volatility = np.log(close).diff().rolling(20, min_periods=10).std().dropna()
-    if rolling_volatility.empty:
-        return "Unknown"
-    latest = float(rolling_volatility.iloc[-1])
-    lower_quartile = float(rolling_volatility.quantile(0.25))
-    upper_quartile = float(rolling_volatility.quantile(0.75))
-    regime = "High volatility" if latest >= upper_quartile else "Low volatility" if latest <= lower_quartile else "Normal volatility"
-    bac_debug_kv(
-        "views.volatility_regime",
-        latest=latest,
-        lower_quartile=lower_quartile,
-        upper_quartile=upper_quartile,
-        regime=regime,
-    )
-    return regime
-
-
-def prepare_realtime_forecast_history(
-    price_history: pd.DataFrame,
-    *,
-    realtime_mode: bool,
-) -> pd.DataFrame:
-    """Freeze intraday model input within each five-minute refresh bucket.
-
-    A 60-second fragment rerun should redraw new observed prices, but it should
-    not continuously refit the model against a bar that may still be forming.
-    Excluding the latest five-minute bucket gives the forecast a stable origin
-    until the next bucket begins. Daily mode returns the original history
-    unchanged.
-    """
-    if (
-        not realtime_mode
-        or price_history.empty
-        or "Date" not in price_history.columns
-    ):
-        return price_history
-
-    dates = pd.to_datetime(price_history["Date"], errors="coerce")
-    latest_bar = dates.max()
-    if pd.isna(latest_bar):
-        return price_history
-
-    active_bucket_start = latest_bar.floor(REALTIME_MODEL_REFRESH_FREQUENCY)
-    completed_history = price_history.loc[dates < active_bucket_start].copy()
-
-    # Very short market sessions or newly listed symbols may not yet have
-    # enough completed bars. In that case retain the full frame so the existing
-    # readiness diagnostics, rather than this optimization, decide whether a
-    # forecast is possible.
-    if len(completed_history) < 30:
-        completed_history = price_history.copy()
-        status = "full_history_short_fallback"
-    else:
-        status = "completed_bucket"
-
-    completed_history.attrs.update(price_history.attrs)
-    bac_debug_kv(
-        "views.realtime_model_input",
-        status=status,
-        live_rows=len(price_history),
-        model_rows=len(completed_history),
-        latest_live_bar=str(latest_bar),
-        latest_model_bar=(
-            str(completed_history["Date"].iloc[-1])
-            if not completed_history.empty
-            else None
-        ),
-        refresh_frequency=REALTIME_MODEL_REFRESH_FREQUENCY,
-    )
-    return completed_history
 
 
 def _leaderboard_column_config(
@@ -312,87 +230,178 @@ def render_charts_view(
         forecast_points=forecast_points,
         ticker_count=len(tickers),
     )
-    bac_log_list_preview("views.render_charts_view", "incoming_tickers", tickers)
 
     # Automatic daily markets are intentionally loaded as a wider candidate
-    # pool.  The pooled model below, rather than today's price move, decides
-    # which ten tickers deserve charts.  Manual and intraday modes remain bounded
+    # pool.  The pooled model, rather than today's price move, decides which
+    # ten tickers deserve charts.  Manual and intraday modes remain bounded
     # because users have already selected/order-ranked those symbols.
     market_source = get_market_source(ticker_source)
     automatic_daily_ranking = market_source is not None and not realtime_mode
-    active_tickers = tickers if automatic_daily_ranking else tickers[:MAX_CHARTED_PERFORMERS]
+    candidate_tickers = tickers if automatic_daily_ranking else tickers[:MAX_CHARTED_PERFORMERS]
     if automatic_daily_ranking:
         st.info(
-            f"Evaluating {len(active_tickers)} market candidates, then automatically charting the best {MAX_CHARTED_PERFORMERS} forward predictions."
+            f"Evaluating {len(candidate_tickers)} market candidates, then automatically charting the best {MAX_CHARTED_PERFORMERS} forward predictions."
         )
     elif len(tickers) > MAX_CHARTED_PERFORMERS:
         st.info(f"Charting the first {MAX_CHARTED_PERFORMERS} selected symbols.")
-    bac_log_kv(
-        "views.render_charts_view",
-        automatic_daily_ranking=automatic_daily_ranking,
-        candidate_count=len(active_tickers),
-        chart_limit=MAX_CHARTED_PERFORMERS,
-    )
 
     with st.spinner("Loading price history for charting..."):
-        price_data = get_price_history_batch(active_tickers, period=period, interval=interval)
-
-    valid_tickers = [ticker for ticker in active_tickers if not price_data[ticker].empty]
-    bac_log_list_preview("views.render_charts_view", "valid_tickers", valid_tickers)
-
-    # Intraday endpoints are the most fragile, so the fallback keeps the page usable.
-    if realtime_mode and not valid_tickers:
-        bac_log_section(
-            "views.render_charts_view",
-            "Intraday fetch was empty; falling back to daily history.",
+        prices = load_chart_prices(
+            candidate_tickers,
+            period=period,
+            interval=interval,
+            realtime_mode=realtime_mode,
+            forecast_points=forecast_points,
         )
+    if prices.daily_fallback:
         st.warning("Real-time data is temporarily unavailable. Showing recent daily history instead.")
-        price_data = get_price_history_batch(active_tickers, period="6mo", interval="1d")
-        valid_tickers = [ticker for ticker in active_tickers if not price_data[ticker].empty]
-        # Downstream labels, forecast dates, and horizons must match the daily
-        # fallback.  Keeping the original minute settings would place daily
-        # forecasts only minutes apart and misstate the model's horizon.
-        realtime_mode = False
-        interval = "1d"
-        forecast_points = min(forecast_points, 5)
-        bac_log_list_preview("views.render_charts_view", "fallback_valid_tickers", valid_tickers)
-
-    if not valid_tickers:
+    if not prices.valid_tickers:
         bac_log_section("views.render_charts_view", "No valid chart data was available.")
         st.error(
             "No live or last-known-good price history is available. Check ticker "
             "symbols, provider connectivity, and [BAC_LOG] market-data entries."
         )
         st.stop()
+    # A daily fallback changes the mode, interval, and horizon for every later step.
+    realtime_mode = prices.realtime_mode
+    interval = prices.interval
+    forecast_points = prices.forecast_points
+    price_data = prices.price_data
 
     health = classify_price_histories(
-        {ticker: price_data[ticker] for ticker in valid_tickers},
+        {ticker: price_data[ticker] for ticker in prices.valid_tickers},
         realtime_mode=realtime_mode,
     )
-    live_tickers = health.live_tickers
-    stale_tickers = health.stale_tickers
-    freshness_by_ticker = health.freshness_by_ticker
-    if stale_tickers:
+    _render_data_health(health, price_data)
+
+    monitoring_market = str(ticker_source or "Manual tickers")
+    resolved_forecasts = resolve_matured_forecasts(price_data, health, monitoring_market)
+    if resolved_forecasts:
+        st.toast(f"Resolved {resolved_forecasts} earlier forecast observations.")
+
+    ranking = MarketRankingResult()
+    if automatic_daily_ranking and len(health.live_tickers) >= 2:
+        with st.spinner(
+            "Training the market-wide ensemble and ranking forward opportunities..."
+        ):
+            ranking = rank_live_candidates(
+                price_data,
+                health,
+                forecast_horizon=forecast_points,
+                monitoring_market=monitoring_market,
+            )
+
+    selection = select_charted_tickers(
+        market_source=market_source,
+        ranking=ranking.ranking,
+        candidate_tickers=candidate_tickers,
+        valid_tickers=prices.valid_tickers,
+        detected_performers=detected_performers,
+        price_data=price_data,
+        realtime_mode=realtime_mode,
+        interval=interval,
+    )
+    if market_source is not None and ranking.ranking.empty and automatic_daily_ranking:
+        _render_ranking_pending_notice(ticker_source, period, forecast_points)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Charted performers", len(selection.tickers))
+    col2.metric(selection.leader_label, selection.tickers[0])
+    col3.metric(selection.performance_label, selection.performance_value)
+
+    if market_source is not None:
+        _render_market_ranking(
+            market_source,
+            ranking,
+            detected_performers,
+            forecast_points,
+            price_format,
+        )
+
+    if realtime_mode:
+        bac_log_section("views.render_charts_view", "Rendering realtime quote metrics.")
+        _render_latest_bar_quotes(price_data, selection.tickers, interval, price_prefix)
+        st.caption(
+            "Intraday figures use the latest returned bar close. The delta is versus the prior bar, not a live tick or daily change."
+        )
+
+    horizon_label = selected_horizon_label(realtime_mode, interval, forecast_points)
+    if market_source is not None and not ranking.ranking.empty:
+        chart_heading = "Predicted top 10 - history, forecast, and uncertainty"
+    elif market_source is not None:
+        chart_heading = market_source.chart_heading
+    else:
+        chart_heading = MANUAL_CHART_HEADING
+    st.subheader(chart_heading)
+    st.caption(
+        f"The dashed line is the ticker-level {horizon_label} forecast. Shaded 50% and 80% bands are calibrated from earlier walk-forward return residuals. On daily horizons, point-in-time sentiment is continuously evaluated and only replaces the price-only curve after at least {MIN_BACKTEST_POINTS} paired forecasts improve MAE."
+    )
+
+    forecasts: list[TickerForecast] = []
+    for ticker in selection.tickers:
+        forecast = build_ticker_forecast(
+            ticker,
+            price_data[ticker],
+            ticker_source=ticker_source,
+            realtime_mode=realtime_mode,
+            interval=interval,
+            forecast_points=forecast_points,
+            preloaded_sentiment=ranking.sentiment_by_ticker.get(ticker),
+        )
+        record_displayed_forecast(
+            forecast,
+            monitoring_market=monitoring_market,
+            ranking=ranking.ranking,
+        )
+        _render_forecast_status_warning(forecast)
+        st.plotly_chart(
+            _build_forecast_figure(
+                forecast,
+                realtime_mode=realtime_mode,
+                interval=interval,
+                price_axis_label=price_axis_label,
+            ),
+            key=f"price_forecast_chart_{ticker}_{interval}",
+        )
+        _render_forecast_caption(
+            forecast,
+            horizon_label=horizon_label,
+            price_prefix=price_prefix,
+            realtime_mode=realtime_mode,
+        )
+        forecasts.append(forecast)
+
+    _render_forecast_pipeline_summary(forecasts, health)
+    _render_backtest_table(forecasts, horizon_label, forecast_points, price_format)
+    _render_model_monitoring(monitoring_market, forecast_points, price_format)
+    bac_log_section("views.render_charts_view", "Charts rendering completed.")
+
+
+def _render_data_health(health: PriceDataHealth, price_data: dict[str, pd.DataFrame]) -> None:
+    """Keep operational data quality beside the forecasts it affects.
+
+    A paying user should never have to infer data quality from whether a
+    dashed line appeared.
+    """
+    if health.stale_tickers:
         stale_details = ", ".join(
             (
                 f"{ticker} (latest bar "
-                f"{freshness_by_ticker[ticker].get('latest_bar', 'unknown')}; "
+                f"{health.freshness_by_ticker[ticker].get('latest_bar', 'unknown')}; "
                 f"last fetched "
                 f"{price_data[ticker].attrs.get('bac_fetched_at', 'unknown')})"
             )
-            for ticker in stale_tickers
+            for ticker in health.stale_tickers
         )
         st.warning(
             "Market-data recovery/staleness mode is active. Forecasts remain "
             f"visible but are not treated as fresh for: {stale_details}."
         )
 
-    # Keep operational health beside the product output. A paying user should
-    # never have to infer data quality from whether a dashed line appeared.
     latest_market_bar = max(
         (
             diagnosis["latest_bar"]
-            for diagnosis in freshness_by_ticker.values()
+            for diagnosis in health.freshness_by_ticker.values()
             if diagnosis.get("latest_bar") is not None
         ),
         default=None,
@@ -400,10 +409,10 @@ def render_charts_view(
     data_health_columns = st.columns(4)
     data_health_columns[0].metric(
         "Data pipeline",
-        "Healthy" if not stale_tickers else "Recovery mode",
+        "Healthy" if not health.stale_tickers else "Recovery mode",
     )
-    data_health_columns[1].metric("Fresh histories", len(live_tickers))
-    data_health_columns[2].metric("Stale/recovered", len(stale_tickers))
+    data_health_columns[1].metric("Fresh histories", len(health.live_tickers))
+    data_health_columns[2].metric("Stale/recovered", len(health.stale_tickers))
     data_health_columns[3].metric(
         "Latest market bar",
         (
@@ -413,594 +422,325 @@ def render_charts_view(
         ),
     )
 
-    monitoring_market = str(ticker_source or "Manual tickers")
-    # Resolve old forecasts before writing the current run.  Only target bars
-    # already present in freshly fetched history can close an observation.
-    # Stale snapshots are intentionally excluded so an outage cannot create a
-    # misleading resolution event.
-    resolved_forecasts = resolve_pending_forecasts(
-        {ticker: price_data[ticker] for ticker in live_tickers},
-        monitoring_market,
-    )
-    if resolved_forecasts:
-        st.toast(f"Resolved {resolved_forecasts} earlier forecast observations.")
 
-    sentiment_by_ticker: dict[str, pd.DataFrame] = {}
-    market_ranking: pd.DataFrame = pd.DataFrame()
-    market_diagnostics: dict[str, object] = {}
-    if automatic_daily_ranking and len(live_tickers) >= 2:
-        # SQLite reads are local and fast; passing all available histories makes
-        # sentiment part of the ranking continuously as the collector adds data.
-        sentiment_by_ticker = {
-            ticker: load_sentiment_history(ticker)
-            for ticker in live_tickers
-        }
-        usable_price_data = {ticker: price_data[ticker] for ticker in live_tickers}
-        with st.spinner(
-            "Training the market-wide ensemble and ranking forward opportunities..."
-        ):
-            ranking_result = rank_market_candidates(
-                usable_price_data,
-                forecast_horizon=forecast_points,
-                sentiment_by_ticker=sentiment_by_ticker,
-                top_n=MAX_CHARTED_PERFORMERS,
-            )
-        market_ranking = ranking_result.get("ranking", pd.DataFrame())
-        market_diagnostics = ranking_result.get("diagnostics", {})
-        if market_diagnostics:
-            ranking_as_of = max(
-                pd.Timestamp(price_data[ticker]["Date"].max())
-                for ticker in valid_tickers
-            )
-            record_market_model_run(
-                monitoring_market,
-                forecast_points,
-                ranking_as_of,
-                market_diagnostics,
-            )
-
-    if market_source is not None:
-        if not market_ranking.empty:
-            top_performers = market_ranking["Ticker"].tolist()
-            leader_label = "Top predicted ticker"
-            performance_label = "Expected excess return"
-            performance_value = f"{float(market_ranking['Expected excess return'].iloc[0]):+.2f}%"
-        else:
-            # A transparent fallback preserves chart access when the candidate
-            # history is too short for the embargoed pooled validation.
-            top_performers = [
-                ticker for ticker in active_tickers if ticker in valid_tickers
-            ][:MAX_CHARTED_PERFORMERS]
-            daily_change_by_ticker = (
-                detected_performers.set_index("Ticker")["Daily change"].to_dict()
-            )
-            leader_label = market_source.fallback_leader_label
-            performance_label = market_source.fallback_performance_label
-            leader_change = daily_change_by_ticker.get(top_performers[0], np.nan)
-            performance_value = (
-                f"{leader_change:.2f}%" if pd.notna(leader_change) else "Unavailable"
-            )
-            if automatic_daily_ranking:
-                if ANALYTICS_READ_ONLY:
-                    st.info(
-                        "The analytics worker is preparing this market, period, and horizon. "
-                        "Showing the current daily ordering until its shared result is ready."
-                    )
-                    bac_log_kv(
-                        "views.render_charts_view",
-                        status="analytics_worker_pending",
-                        ticker_source=ticker_source,
-                        period=period,
-                        forecast_points=forecast_points,
-                    )
-                else:
-                    st.warning(
-                        "The market-wide model does not yet have enough embargoed history; using the current daily ordering temporarily."
-                    )
+def _render_ranking_pending_notice(
+    ticker_source: str | None,
+    period: str,
+    forecast_points: int,
+) -> None:
+    """Explain why an automatic market shows its daily ordering instead of ranks."""
+    if ANALYTICS_READ_ONLY:
+        st.info(
+            "The analytics worker is preparing this market, period, and horizon. "
+            "Showing the current daily ordering until its shared result is ready."
+        )
         bac_log_kv(
             "views.render_charts_view",
-            leader_label=leader_label,
-            performance_value=performance_value,
-            ranking_available=not market_ranking.empty,
-        )
-    else:
-        scores = {ticker: growth_score(price_data[ticker]) for ticker in valid_tickers}
-        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        top_performers = [ticker for ticker, _ in ranked[:MAX_CHARTED_PERFORMERS]]
-        current_momentum_label = momentum_label(realtime_mode, interval)
-        leader_label = f"Top {current_momentum_label} mover"
-        performance_label = f"Best {current_momentum_label} growth"
-        performance_value = f"{ranked[0][1]:.2f}%"
-        bac_log_kv(
-            "views.render_charts_view",
-            leader_label=leader_label,
-            performance_value=performance_value,
-            top_ranked=ranked[:3],
-        )
-
-    bac_log_list_preview("views.render_charts_view", "top_performers", top_performers)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Charted performers", len(top_performers))
-    col2.metric(leader_label, top_performers[0])
-    col3.metric(performance_label, performance_value)
-
-    if market_source is not None:
-        bac_log_section("views.render_charts_view", "Rendering automatic market ranking.")
-        if not market_ranking.empty:
-            st.subheader("Model-ranked top 10 forward opportunities")
-            st.caption(
-                f"These are the ten strongest {forecast_points}-session market-relative forecasts from the full loaded candidate pool. The score blends expected excess return, calibrated probability, model agreement, market context, liquidity, and continuously collected sentiment. 'Abstain' means the point estimate is not strong enough relative to uncertainty."
-            )
-            company_lookup = (
-                detected_performers[["Ticker", "Company"]].drop_duplicates("Ticker")
-                if "Company" in detected_performers.columns
-                else pd.DataFrame(columns=["Ticker", "Company"])
-            )
-            ranking_display = market_ranking.merge(
-                company_lookup,
-                on="Ticker",
-                how="left",
-                validate="one_to_one",
-            )
-            ranking_display = ranking_display[
-                [
-                    "Rank",
-                    "Ticker",
-                    "Company",
-                    "Signal",
-                    "Expected excess return",
-                    "Probability outperform",
-                    "Lower 80",
-                    "Upper 80",
-                    "Predicted volatility",
-                    "Model disagreement",
-                    "Sentiment score",
-                ]
-            ]
-            st.dataframe(
-                ranking_display,
-                column_config={
-                    "Expected excess return": st.column_config.NumberColumn(
-                        "Expected excess return", format="%+.2f%%"
-                    ),
-                    "Probability outperform": st.column_config.ProgressColumn(
-                        "Probability outperform", min_value=0, max_value=100, format="%.1f%%"
-                    ),
-                    "Lower 80": st.column_config.NumberColumn("80% lower", format="%+.2f%%"),
-                    "Upper 80": st.column_config.NumberColumn("80% upper", format="%+.2f%%"),
-                    "Predicted volatility": st.column_config.NumberColumn(
-                        "Predicted volatility", format="%.2f%%"
-                    ),
-                    "Model disagreement": st.column_config.NumberColumn(
-                        "Model disagreement", format="%.2f%%"
-                    ),
-                    "Sentiment score": st.column_config.NumberColumn(
-                        "24h sentiment", format="%+.3f"
-                    ),
-                },
-                hide_index=True,
-                width="stretch",
-            )
-
-            # A compact metric strip surfaces the untouched evaluation period,
-            # including a direct backtest of selecting the ten best each date.
-            diagnostic_columns = st.columns(5)
-            diagnostic_columns[0].metric(
-                "Evaluation direction",
-                f"{float(market_diagnostics.get('Directional accuracy', np.nan)):.1f}%",
-            )
-            diagnostic_columns[1].metric(
-                "80% band coverage",
-                f"{float(market_diagnostics.get('80% interval coverage', np.nan)):.1f}%",
-            )
-            diagnostic_columns[2].metric(
-                "Excess-return MAE",
-                f"{float(market_diagnostics.get('Evaluation MAE', np.nan)):.2f}%",
-            )
-            diagnostic_columns[3].metric(
-                "Top-10 realized excess",
-                f"{float(market_diagnostics.get('Top-10 realized mean excess', np.nan)):+.2f}%",
-            )
-            diagnostic_columns[4].metric(
-                "Top-10 realized hit rate",
-                f"{float(market_diagnostics.get('Top-10 realized hit rate', np.nan)):.1f}%",
-            )
-            with st.expander("Model validation and weighting details"):
-                st.json(market_diagnostics)
-        else:
-            st.subheader(market_source.fallback_heading)
-            st.caption(
-                "The pooled ranking is temporarily unavailable, so this table shows the current daily-move candidates."
-            )
-
-        # Keep source selection visible without confusing it with the predictive
-        # ranking.  Users can inspect the underlying movers in a collapsed area.
-        with st.expander("Current daily-move candidate pool"):
-            st.dataframe(
-                detected_performers,
-                column_config=_leaderboard_column_config(detected_performers, price_format),
-                hide_index=True,
-                width="stretch",
-            )
-
-    if realtime_mode:
-        bac_log_section("views.render_charts_view", "Rendering realtime quote metrics.")
-        _render_latest_bar_quotes(price_data, top_performers, interval, price_prefix)
-        st.caption(
-            "Intraday figures use the latest returned bar close. The delta is versus the prior bar, not a live tick or daily change."
-        )
-
-    horizon_label = selected_horizon_label(realtime_mode, interval, forecast_points)
-    if market_source is not None and not market_ranking.empty:
-        chart_heading = "Predicted top 10 - history, forecast, and uncertainty"
-    elif market_source is not None:
-        chart_heading = market_source.chart_heading
-    else:
-        chart_heading = MANUAL_CHART_HEADING
-
-    st.subheader(chart_heading)
-    st.caption(
-        f"The dashed line is the ticker-level {horizon_label} forecast. Shaded 50% and 80% bands are calibrated from earlier walk-forward return residuals. On daily horizons, point-in-time sentiment is continuously evaluated and only replaces the price-only curve after at least {MIN_BACKTEST_POINTS} paired forecasts improve MAE."
-    )
-
-    backtest_rows = []
-    forecast_successes = 0
-    forecast_failures: list[dict[str, object]] = []
-    for ticker in top_performers:
-        df = price_data[ticker]
-        model_df = prepare_realtime_forecast_history(
-            df,
-            realtime_mode=realtime_mode,
-        )
-        using_stale_data = df.attrs.get("bac_data_status") in {
-            "last_known_good",
-            "provider_stale",
-        }
-        bac_debug_kv(
-            "views.render_charts_view.ticker",
-            ticker=ticker,
-            price_rows=len(df),
+            status="analytics_worker_pending",
+            ticker_source=ticker_source,
+            period=period,
             forecast_points=forecast_points,
-            data_status=df.attrs.get("bac_data_status", "live"),
-            data_fetched_at=df.attrs.get("bac_fetched_at"),
+        )
+    else:
+        st.warning(
+            "The market-wide model does not yet have enough embargoed history; using the current daily ordering temporarily."
         )
 
-        calendar_name = resolve_market_calendar(ticker_source, ticker)
-        price_fc = forecast_feature_model(
-            model_df,
-            points_ahead=forecast_points,
-            market_calendar=calendar_name,
-        )
-        price_backtest = backtest_forecast_model(
-            model_df,
-            forecast_horizon=forecast_points,
-            market_calendar=calendar_name,
-        )
-        if realtime_mode:
-            sentiment_history = pd.DataFrame()
-        elif ticker in sentiment_by_ticker:
-            sentiment_history = sentiment_by_ticker[ticker]
-        else:
-            sentiment_history = load_sentiment_history(ticker)
-        sentiment_fc = pd.DataFrame()
-        sentiment_backtest = pd.DataFrame()
-        if not realtime_mode and not sentiment_history.empty:
-            sentiment_fc = forecast_feature_model(
-                model_df,
-                points_ahead=forecast_points,
-                sentiment_history=sentiment_history,
-                include_sentiment=True,
-                market_calendar=calendar_name,
-            )
-            sentiment_backtest = backtest_forecast_model(
-                model_df,
-                forecast_horizon=forecast_points,
-                sentiment_history=sentiment_history,
-                include_sentiment=True,
-                market_calendar=calendar_name,
-            )
 
-        comparison = None
-        if not price_backtest.empty:
-            comparison = summarize_model_comparison(
-                ticker,
-                price_backtest,
-                sentiment_backtest,
-                forecast_points,
-            )
-        sentiment_promoted = bool(
-            comparison is not None
-            and comparison["Active model"] == "Price + sentiment"
-            and not sentiment_fc.empty
+def _render_market_ranking(
+    market_source: MarketSource,
+    ranking: MarketRankingResult,
+    detected_performers: pd.DataFrame,
+    forecast_points: int,
+    price_format: str,
+) -> None:
+    """Show the pooled-model ranking (or its fallback) and the candidate pool."""
+    bac_log_section("views.render_charts_view", "Rendering automatic market ranking.")
+    if ranking.ranking.empty:
+        st.subheader(market_source.fallback_heading)
+        st.caption(
+            "The pooled ranking is temporarily unavailable, so this table shows the current daily-move candidates."
         )
-        fc = sentiment_fc if sentiment_promoted else price_fc
-        backtest = sentiment_backtest if sentiment_promoted else price_backtest
-        active_model = "Price + sentiment" if sentiment_promoted else "Price only"
-        fc = add_forecast_intervals(
-            fc,
-            backtest,
-            last_close=float(model_df["Close"].iloc[-1]),
+    else:
+        st.subheader("Model-ranked top 10 forward opportunities")
+        st.caption(
+            f"These are the ten strongest {forecast_points}-session market-relative forecasts from the full loaded candidate pool. The score blends expected excess return, calibrated probability, model agreement, market context, liquidity, and continuously collected sentiment. 'Abstain' means the point estimate is not strong enough relative to uncertainty."
         )
-        if fc.empty:
-            # An empty Plotly chart previously looked like "forecasting did
-            # nothing." Diagnose the failed ticker only after the fast path has
-            # failed, then expose the exact cause to both the user and BAC logs.
-            diagnosis = diagnose_forecast_readiness(
-                model_df,
-                forecast_horizon=1,
-                market_calendar=calendar_name,
-            )
-            forecast_failures.append({"ticker": ticker, **diagnosis})
-            bac_log_kv(
-                "views.render_charts_view.forecast_status",
-                ticker=ticker,
-                requested_points=forecast_points,
-                returned_points=0,
-                **diagnosis,
-            )
-            st.warning(f"{ticker}: forecast unavailable. {diagnosis['message']}")
-        else:
-            forecast_successes += 1
-            if len(fc) < forecast_points:
-                # A curve can stop at a later horizon when only the longest
-                # target lacks enough realized training labels. Keep the useful
-                # prefix and identify precisely where it became unavailable.
-                diagnosis = diagnose_forecast_readiness(
-                    model_df,
-                    forecast_horizon=len(fc) + 1,
-                    market_calendar=calendar_name,
-                )
-                forecast_failures.append({"ticker": ticker, **diagnosis})
-                bac_log_kv(
-                    "views.render_charts_view.forecast_status",
-                    ticker=ticker,
-                    requested_points=forecast_points,
-                    returned_points=len(fc),
-                    **diagnosis,
-                )
-                st.warning(
-                    f"{ticker}: showing {len(fc)} of {forecast_points} requested "
-                    f"forecast points. {diagnosis['message']}"
-                )
-            else:
-                bac_log_kv(
-                    "views.render_charts_view.forecast_status",
-                    ticker=ticker,
-                    requested_points=forecast_points,
-                    returned_points=len(fc),
-                    status="ready",
-                )
-        bac_debug_kv(
-            "views.render_charts_view.ticker",
-            ticker=ticker,
-            forecast_rows=len(fc),
-            backtest_rows=len(backtest),
-            sentiment_articles=len(sentiment_history),
-            sentiment_promoted=sentiment_promoted,
+        company_lookup = (
+            detected_performers[["Ticker", "Company"]].drop_duplicates("Ticker")
+            if "Company" in detected_performers.columns
+            else pd.DataFrame(columns=["Ticker", "Company"])
+        )
+        ranking_display = ranking.ranking.merge(
+            company_lookup,
+            on="Ticker",
+            how="left",
+            validate="one_to_one",
+        )
+        ranking_display = ranking_display[
+            [
+                "Rank",
+                "Ticker",
+                "Company",
+                "Signal",
+                "Expected excess return",
+                "Probability outperform",
+                "Lower 80",
+                "Upper 80",
+                "Predicted volatility",
+                "Model disagreement",
+                "Sentiment score",
+            ]
+        ]
+        st.dataframe(
+            ranking_display,
+            column_config={
+                "Expected excess return": st.column_config.NumberColumn(
+                    "Expected excess return", format="%+.2f%%"
+                ),
+                "Probability outperform": st.column_config.ProgressColumn(
+                    "Probability outperform", min_value=0, max_value=100, format="%.1f%%"
+                ),
+                "Lower 80": st.column_config.NumberColumn("80% lower", format="%+.2f%%"),
+                "Upper 80": st.column_config.NumberColumn("80% upper", format="%+.2f%%"),
+                "Predicted volatility": st.column_config.NumberColumn(
+                    "Predicted volatility", format="%.2f%%"
+                ),
+                "Model disagreement": st.column_config.NumberColumn(
+                    "Model disagreement", format="%.2f%%"
+                ),
+                "Sentiment score": st.column_config.NumberColumn(
+                    "24h sentiment", format="%+.3f"
+                ),
+            },
+            hide_index=True,
+            width="stretch",
         )
 
-        fig = go.Figure()
+        # A compact metric strip surfaces the untouched evaluation period,
+        # including a direct backtest of selecting the ten best each date.
+        diagnostics = ranking.diagnostics
+        diagnostic_columns = st.columns(5)
+        diagnostic_columns[0].metric(
+            "Evaluation direction",
+            f"{float(diagnostics.get('Directional accuracy', np.nan)):.1f}%",
+        )
+        diagnostic_columns[1].metric(
+            "80% band coverage",
+            f"{float(diagnostics.get('80% interval coverage', np.nan)):.1f}%",
+        )
+        diagnostic_columns[2].metric(
+            "Excess-return MAE",
+            f"{float(diagnostics.get('Evaluation MAE', np.nan)):.2f}%",
+        )
+        diagnostic_columns[3].metric(
+            "Top-10 realized excess",
+            f"{float(diagnostics.get('Top-10 realized mean excess', np.nan)):+.2f}%",
+        )
+        diagnostic_columns[4].metric(
+            "Top-10 realized hit rate",
+            f"{float(diagnostics.get('Top-10 realized hit rate', np.nan)):.1f}%",
+        )
+        with st.expander("Model validation and weighting details"):
+            st.json(diagnostics)
 
-        # The solid line anchors the user in observed history before the forecast starts.
+    # Keep source selection visible without confusing it with the predictive
+    # ranking.  Users can inspect the underlying movers in a collapsed area.
+    with st.expander("Current daily-move candidate pool"):
+        st.dataframe(
+            detected_performers,
+            column_config=_leaderboard_column_config(detected_performers, price_format),
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def _render_forecast_status_warning(forecast: TickerForecast) -> None:
+    """Tell the user exactly why a curve is missing or shorter than requested."""
+    if forecast.status == "unavailable":
+        st.warning(f"{forecast.ticker}: forecast unavailable. {forecast.diagnosis['message']}")
+    elif forecast.status == "partial":
+        st.warning(
+            f"{forecast.ticker}: showing {len(forecast.forecast)} of "
+            f"{forecast.requested_points} requested forecast points. "
+            f"{forecast.diagnosis['message']}"
+        )
+
+
+def _add_band(
+    fig: go.Figure,
+    forecast: TickerForecast,
+    level: int,
+    fillcolor: str,
+) -> None:
+    """Shade one uncertainty band between its upper and lower curves."""
+    lower, upper = f"lower_{level}", f"upper_{level}"
+    if not {lower, upper}.issubset(forecast.forecast.columns):
+        return
+    legend_group = f"{forecast.ticker}-{level}-band"
+    fig.add_trace(
+        go.Scatter(
+            x=forecast.future_dates,
+            y=forecast.forecast[upper],
+            mode="lines",
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+            legendgroup=legend_group,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=forecast.future_dates,
+            y=forecast.forecast[lower],
+            mode="lines",
+            line={"width": 0},
+            fill="tonexty",
+            fillcolor=fillcolor,
+            name=f"{forecast.ticker} {level}% interval",
+            legendgroup=legend_group,
+        )
+    )
+
+
+def _build_forecast_figure(
+    forecast: TickerForecast,
+    *,
+    realtime_mode: bool,
+    interval: str,
+    price_axis_label: str,
+) -> go.Figure:
+    """Draw observed history, the latest bar, uncertainty bands, and the curve."""
+    ticker = forecast.ticker
+    history = forecast.history
+    fig = go.Figure()
+    # The solid line anchors the user in observed history before the forecast starts.
+    fig.add_trace(
+        go.Scatter(
+            x=history["Date"],
+            y=history["Close"],
+            mode="lines",
+            name=f"{ticker} Close",
+            line={"width": 2},
+        )
+    )
+    # A separate marker makes the most recent observed point visually obvious.
+    fig.add_trace(
+        go.Scatter(
+            x=[history["Date"].iloc[-1]],
+            y=[history["Close"].iloc[-1]],
+            mode="markers",
+            name=f"{ticker} Latest",
+            marker={"size": 10},
+        )
+    )
+    if not forecast.forecast.empty:
+        # The forecast origin is the last stable model bar. The observed line
+        # may already extend a few minutes beyond it because live prices redraw
+        # more frequently than the forecast is recomputed. Bands are drawn from
+        # widest to narrowest so both remain visible under the central line.
+        _add_band(fig, forecast, 80, "rgba(99, 110, 250, 0.12)")
+        _add_band(fig, forecast, 50, "rgba(99, 110, 250, 0.24)")
         fig.add_trace(
             go.Scatter(
-                x=df["Date"],
-                y=df["Close"],
+                x=forecast.future_dates,
+                y=forecast.forecast["pred_close"],
                 mode="lines",
-                name=f"{ticker} Close",
-                line={"width": 2},
+                name=f"{ticker} {forecast.active_model} forecast",
+                line={"dash": "dash", "width": 2},
             )
         )
 
-        # A separate marker makes the most recent observed point visually obvious.
-        fig.add_trace(
-            go.Scatter(
-                x=[df["Date"].iloc[-1]],
-                y=[df["Close"].iloc[-1]],
-                mode="markers",
-                name=f"{ticker} Latest",
-                marker={"size": 10},
-            )
-        )
+    fig.update_layout(
+        title=f"{ticker}: Price History & Feature Forecast",
+        xaxis_title="Timestamp" if realtime_mode else "Date",
+        yaxis_title=price_axis_label,
+        template="plotly_white",
+        height=420,
+        # A stable uirevision tells Plotly to retain zoom, pan, and legend
+        # choices when Streamlit replaces the figure with fresh live data.
+        uirevision=f"{ticker}:{interval}:{'live' if realtime_mode else 'daily'}",
+    )
+    return fig
 
-        if not fc.empty:
-            # The forecast origin is the last stable model bar. The observed
-            # line may already extend a few minutes beyond it because live
-            # prices redraw more frequently than the forecast is recomputed.
-            last_date = model_df["Date"].iloc[-1]
-            future_dates = future_projection_dates(
-                last_date,
-                len(fc),
-                realtime_mode,
-                interval,
-                market_calendar=resolve_market_calendar(ticker_source, ticker),
-            )
-            # Draw uncertainty from widest to narrowest so both bands remain
-            # visible underneath the central forecast line.
-            if {"lower_80", "upper_80"}.issubset(fc.columns):
-                fig.add_trace(
-                    go.Scatter(
-                        x=future_dates,
-                        y=fc["upper_80"],
-                        mode="lines",
-                        line={"width": 0},
-                        hoverinfo="skip",
-                        showlegend=False,
-                        legendgroup=f"{ticker}-80-band",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=future_dates,
-                        y=fc["lower_80"],
-                        mode="lines",
-                        line={"width": 0},
-                        fill="tonexty",
-                        fillcolor="rgba(99, 110, 250, 0.12)",
-                        name=f"{ticker} 80% interval",
-                        legendgroup=f"{ticker}-80-band",
-                    )
-                )
-            if {"lower_50", "upper_50"}.issubset(fc.columns):
-                fig.add_trace(
-                    go.Scatter(
-                        x=future_dates,
-                        y=fc["upper_50"],
-                        mode="lines",
-                        line={"width": 0},
-                        hoverinfo="skip",
-                        showlegend=False,
-                        legendgroup=f"{ticker}-50-band",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=future_dates,
-                        y=fc["lower_50"],
-                        mode="lines",
-                        line={"width": 0},
-                        fill="tonexty",
-                        fillcolor="rgba(99, 110, 250, 0.24)",
-                        name=f"{ticker} 50% interval",
-                        legendgroup=f"{ticker}-50-band",
-                    )
-                )
-            fig.add_trace(
-                go.Scatter(
-                    x=future_dates,
-                    y=fc["pred_close"],
-                    mode="lines",
-                    name=f"{ticker} {active_model} forecast",
-                    line={"dash": "dash", "width": 2},
-                )
-            )
-            if len(future_dates):
-                final_projection = fc.iloc[-1]
-                ranking_row = (
-                    market_ranking[market_ranking["Ticker"] == ticker]
-                    if "Ticker" in market_ranking.columns
-                    else pd.DataFrame()
-                )
-                if not ranking_row.empty:
-                    monitored_sentiment = float(ranking_row["Sentiment score"].iloc[0])
-                elif not sentiment_history.empty and "sentiment" in sentiment_history.columns:
-                    monitored_sentiment = float(
-                        pd.to_numeric(
-                            sentiment_history["sentiment"], errors="coerce"
-                        ).tail(20).mean()
-                    )
-                else:
-                    monitored_sentiment = np.nan
-                if using_stale_data:
-                    # Showing a clearly labelled recovery forecast is useful;
-                    # recording it as a new live production prediction is not.
-                    bac_debug_kv(
-                        "views.render_charts_view.ticker",
-                        ticker=ticker,
-                        status="stale_forecast_not_recorded",
-                        forecast_origin=str(last_date),
-                    )
-                else:
-                    record_forecast(
-                        market_source=monitoring_market,
-                        ticker=ticker,
-                        forecast_origin=last_date,
-                        target_at=future_dates[-1],
-                        horizon=int(final_projection["projection_point"]),
-                        model_name=active_model,
-                        regime=_volatility_regime(model_df),
-                        origin_close=float(model_df["Close"].iloc[-1]),
-                        predicted_close=float(final_projection["pred_close"]),
-                        predicted_return=float(final_projection["pred_return"]),
-                        lower_80=final_projection.get("lower_80", np.nan),
-                        upper_80=final_projection.get("upper_80", np.nan),
-                        sentiment_score=monitored_sentiment,
-                    )
 
-        fig.update_layout(
-            title=f"{ticker}: Price History & Feature Forecast",
-            xaxis_title="Timestamp" if realtime_mode else "Date",
-            yaxis_title=price_axis_label,
-            template="plotly_white",
-            height=420,
-            # A stable uirevision tells Plotly to retain zoom, pan, and legend
-            # choices when Streamlit replaces the figure with fresh live data.
-            uirevision=f"{ticker}:{interval}:{'live' if realtime_mode else 'daily'}",
-        )
-        st.plotly_chart(
-            fig,
-            key=f"price_forecast_chart_{ticker}_{interval}",
-        )
+def _render_forecast_caption(
+    forecast: TickerForecast,
+    *,
+    horizon_label: str,
+    price_prefix: str,
+    realtime_mode: bool,
+) -> None:
+    """Connect the chart to its backtest scorecard in one sentence."""
+    if forecast.forecast.empty:
+        return
+    final_projection = forecast.forecast.iloc[-1]
+    projected_return_pct = float(final_projection["pred_return"] * 100)
+    projected_close = float(final_projection["pred_close"])
+    confidence = "Unavailable"
+    directional_accuracy = np.nan
+    mae_improvement = np.nan
+    sentiment_status = "Intraday model is price-only" if realtime_mode else "Collecting history"
+    if forecast.comparison is not None:
+        confidence = forecast.comparison["Confidence"]
+        directional_accuracy = float(forecast.comparison["Directional accuracy"])
+        mae_improvement = float(forecast.comparison["MAE improvement vs. no-change"])
+        sentiment_status = str(forecast.comparison["Sentiment status"])
 
-        # The caption under each chart helps connect the picture to the scorecard.
-        if not fc.empty:
-            current_projection = fc.iloc[-1]
-            current_return_pct = float(current_projection["pred_return"] * 100)
-            current_close = float(current_projection["pred_close"])
-            confidence = "Unavailable"
-            directional_accuracy = np.nan
-            mae_improvement = np.nan
-            sentiment_status = "Intraday model is price-only" if realtime_mode else "Collecting history"
+    accuracy_text = (
+        f"{directional_accuracy:.1f}% directional accuracy"
+        if pd.notna(directional_accuracy)
+        else "directional accuracy unavailable"
+    )
+    improvement_text = (
+        f"{mae_improvement:.1f}% vs. baseline"
+        if pd.notna(mae_improvement)
+        else "MAE comparison unavailable"
+    )
+    data_label = (
+        "RECOVERY FORECAST using last-known-good market data"
+        if forecast.using_stale_data
+        else "current forecast"
+    )
+    bac_debug_kv(
+        "views.forecast_caption",
+        ticker=forecast.ticker,
+        projected_return_pct=projected_return_pct,
+        projected_close=projected_close,
+        confidence=confidence,
+    )
+    st.caption(
+        f"{forecast.ticker}: {data_label}; {horizon_label} {forecast.active_model.lower()} "
+        f"projection {projected_return_pct:+.2f}% to "
+        f"{price_prefix}{projected_close:.2f}. Backtest rating: "
+        f"{confidence}. Recent backtest: {accuracy_text}, "
+        f"{improvement_text}. Sentiment: {sentiment_status}."
+    )
 
-            if comparison is not None:
-                summary = dict(comparison)
-                confidence = summary["Confidence"]
-                directional_accuracy = float(summary["Directional accuracy"])
-                mae_improvement = float(summary["MAE improvement vs. no-change"])
-                sentiment_status = str(summary["Sentiment status"])
-                summary["Projected return"] = current_return_pct
-                summary["Projected close"] = current_close
-                backtest_rows.append(summary)
 
-            accuracy_text = (
-                f"{directional_accuracy:.1f}% directional accuracy"
-                if pd.notna(directional_accuracy)
-                else "directional accuracy unavailable"
-            )
-            improvement_text = (
-                f"{mae_improvement:.1f}% vs. baseline"
-                if pd.notna(mae_improvement)
-                else "MAE comparison unavailable"
-            )
-            bac_debug_kv(
-                "views.render_charts_view.caption",
-                ticker=ticker,
-                current_return_pct=current_return_pct,
-                current_close=current_close,
-                confidence=confidence,
-            )
-            data_label = (
-                "RECOVERY FORECAST using last-known-good market data"
-                if using_stale_data
-                else "current forecast"
-            )
-            st.caption(
-                f"{ticker}: {data_label}; {horizon_label} {active_model.lower()} "
-                f"projection {current_return_pct:+.2f}% to "
-                f"{price_prefix}{current_close:.2f}. Backtest rating: "
-                f"{confidence}. Recent backtest: {accuracy_text}, "
-                f"{improvement_text}. Sentiment: {sentiment_status}."
-            )
-        elif comparison is not None:
-            backtest_rows.append(comparison)
-
+def _render_forecast_pipeline_summary(
+    forecasts: list[TickerForecast],
+    health: PriceDataHealth,
+) -> None:
+    """Summarize how many charted tickers produced a forecast curve."""
+    successes = sum(1 for forecast in forecasts if not forecast.forecast.empty)
     bac_log_kv(
         "views.render_charts_view.forecast_summary",
-        requested_tickers=len(top_performers),
-        successful_tickers=forecast_successes,
-        failed_or_partial_tickers=len(forecast_failures),
-        live_data_tickers=len(live_tickers),
-        stale_data_tickers=len(stale_tickers),
+        requested_tickers=len(forecasts),
+        successful_tickers=successes,
+        failed_or_partial_tickers=sum(1 for forecast in forecasts if forecast.diagnosis),
+        live_data_tickers=len(health.live_tickers),
+        stale_data_tickers=len(health.stale_tickers),
     )
-    if forecast_successes == len(top_performers):
+    if successes == len(forecasts):
         st.caption(
-            f"Forecast pipeline ready: {forecast_successes}/{len(top_performers)} "
+            f"Forecast pipeline ready: {successes}/{len(forecasts)} "
             "ticker curves generated."
         )
-    elif forecast_successes:
+    elif successes:
         st.warning(
-            f"Forecast pipeline partially available: {forecast_successes}/"
-            f"{len(top_performers)} ticker curves generated. See ticker warnings above."
+            f"Forecast pipeline partially available: {successes}/"
+            f"{len(forecasts)} ticker curves generated. See ticker warnings above."
         )
     else:
         st.error(
@@ -1008,54 +748,25 @@ def render_charts_view(
             "above and [BAC_LOG] entries contain the exact failure reasons."
         )
 
+
+def _render_backtest_table(
+    forecasts: list[TickerForecast],
+    horizon_label: str,
+    forecast_points: int,
+    price_format: str,
+) -> None:
+    """Show walk-forward backtest quality for every charted ticker."""
     st.subheader("Forecast backtest")
     st.caption(
         f"Walk-forward test of up to {MAX_BACKTEST_POINTS} unseen {horizon_label} forecasts. Each forecast is trained only on the preceding {BACKTEST_TRAINING_POINTS} observations and compared with a no-change baseline."
     )
 
-    if backtest_rows:
-        backtest_frame = pd.DataFrame(backtest_rows)
-        bac_log_kv("views.render_charts_view", backtest_summary_rows=len(backtest_frame))
-        st.dataframe(
-            backtest_frame,
-            column_config={
-                "Projected return": st.column_config.NumberColumn(
-                    "Projected return", format="%.2f%%"
-                ),
-                "Projected close": st.column_config.NumberColumn(
-                    "Projected close", format=price_format
-                ),
-                "Model MAE": st.column_config.NumberColumn("Model MAE", format=price_format),
-                "MAPE": st.column_config.NumberColumn("MAPE", format="%.2f%%"),
-                "Directional accuracy": st.column_config.NumberColumn(
-                    "Directional accuracy", format="%.1f%%"
-                ),
-                "No-change MAE": st.column_config.NumberColumn("No-change MAE", format=price_format),
-                "MAE improvement vs. no-change": st.column_config.NumberColumn(
-                    "MAE improvement vs. no-change", format="%.1f%%"
-                ),
-                "Price-only MAE": st.column_config.NumberColumn(
-                    "Price-only MAE", format=price_format
-                ),
-                "Sentiment MAE": st.column_config.NumberColumn(
-                    "Sentiment MAE", format=price_format
-                ),
-                "Price-only directional accuracy": st.column_config.NumberColumn(
-                    "Price-only directional accuracy", format="%.1f%%"
-                ),
-                "Sentiment directional accuracy": st.column_config.NumberColumn(
-                    "Sentiment directional accuracy", format="%.1f%%"
-                ),
-                "Sentiment MAE lift vs. price-only": st.column_config.NumberColumn(
-                    "Sentiment MAE lift vs. price-only", format="%.1f%%"
-                ),
-            },
-            hide_index=True,
-        )
-        st.caption(
-            "Positive sentiment MAE lift means the augmented model beat the otherwise identical price-only model. Sentiment remains under evaluation until enough point-in-time history exists and is promoted only when that lift is positive."
-        )
-    else:
+    backtest_rows = [
+        summary
+        for summary in (forecast.backtest_summary() for forecast in forecasts)
+        if summary is not None
+    ]
+    if not backtest_rows:
         bac_log_section("views.render_charts_view", "No backtest summary rows were available.")
         if ANALYTICS_READ_ONLY:
             st.info(
@@ -1067,7 +778,57 @@ def render_charts_view(
                 "Not enough price observations to backtest this forecast model. "
                 f"At least {BACKTEST_TRAINING_POINTS + forecast_points + MIN_BACKTEST_POINTS - 1} observations are required."
             )
+        return
 
+    backtest_frame = pd.DataFrame(backtest_rows)
+    bac_log_kv("views.render_charts_view", backtest_summary_rows=len(backtest_frame))
+    st.dataframe(
+        backtest_frame,
+        column_config={
+            "Projected return": st.column_config.NumberColumn(
+                "Projected return", format="%.2f%%"
+            ),
+            "Projected close": st.column_config.NumberColumn(
+                "Projected close", format=price_format
+            ),
+            "Model MAE": st.column_config.NumberColumn("Model MAE", format=price_format),
+            "MAPE": st.column_config.NumberColumn("MAPE", format="%.2f%%"),
+            "Directional accuracy": st.column_config.NumberColumn(
+                "Directional accuracy", format="%.1f%%"
+            ),
+            "No-change MAE": st.column_config.NumberColumn("No-change MAE", format=price_format),
+            "MAE improvement vs. no-change": st.column_config.NumberColumn(
+                "MAE improvement vs. no-change", format="%.1f%%"
+            ),
+            "Price-only MAE": st.column_config.NumberColumn(
+                "Price-only MAE", format=price_format
+            ),
+            "Sentiment MAE": st.column_config.NumberColumn(
+                "Sentiment MAE", format=price_format
+            ),
+            "Price-only directional accuracy": st.column_config.NumberColumn(
+                "Price-only directional accuracy", format="%.1f%%"
+            ),
+            "Sentiment directional accuracy": st.column_config.NumberColumn(
+                "Sentiment directional accuracy", format="%.1f%%"
+            ),
+            "Sentiment MAE lift vs. price-only": st.column_config.NumberColumn(
+                "Sentiment MAE lift vs. price-only", format="%.1f%%"
+            ),
+        },
+        hide_index=True,
+    )
+    st.caption(
+        "Positive sentiment MAE lift means the augmented model beat the otherwise identical price-only model. Sentiment remains under evaluation until enough point-in-time history exists and is promoted only when that lift is positive."
+    )
+
+
+def _render_model_monitoring(
+    monitoring_market: str,
+    forecast_points: int,
+    price_format: str,
+) -> None:
+    """Show resolved production-forecast quality and pooled-model drift."""
     st.subheader("Production model monitoring")
     st.caption(
         "Displayed forecasts are stored locally and resolved automatically once their target session arrives. The table is grouped by model, selected horizon, and the volatility regime present at forecast time."
@@ -1102,50 +863,50 @@ def render_charts_view(
         monitoring_market,
         horizon=forecast_points,
     )
-    if not model_history.empty:
-        drift = latest_drift_summary(model_history)
-        if drift:
-            drift_columns = st.columns(4)
-            drift_columns[0].metric(
-                "MAE drift",
-                f"{drift['MAE drift']:+.2f} pp",
-                delta_color="inverse",
-            )
-            drift_columns[1].metric(
-                "Direction drift",
-                f"{drift['Direction drift']:+.1f} pp",
-            )
-            drift_columns[2].metric(
-                "Brier drift",
-                f"{drift['Brier drift']:+.3f}",
-                delta_color="inverse",
-            )
-            drift_columns[3].metric(
-                "Coverage drift",
-                f"{drift['Coverage drift']:+.1f} pp",
-            )
-        with st.expander("Stored market-model run history"):
-            model_history_display = model_history.rename(
-                columns={
-                    "as_of": "As of",
-                    "candidate_tickers": "Candidates",
-                    "evaluation_dates": "Evaluation dates",
-                    "evaluation_mae": "Evaluation MAE",
-                    "baseline_mae": "Baseline MAE",
-                    "directional_accuracy": "Directional accuracy",
-                    "probability_brier": "Probability Brier",
-                    "interval_coverage_80": "80% interval coverage",
-                    "selection_mean_excess": "Top-10 mean excess",
-                    "selection_hit_rate": "Top-10 hit rate",
-                    "sentiment_observed_rows": "Sentiment rows",
-                }
-            )
-            st.dataframe(
-                model_history_display.drop(columns=["model_weights_json"]),
-                hide_index=True,
-                width="stretch",
-            )
-    bac_log_section("views.render_charts_view", "Charts rendering completed.")
+    if model_history.empty:
+        return
+    drift = latest_drift_summary(model_history)
+    if drift:
+        drift_columns = st.columns(4)
+        drift_columns[0].metric(
+            "MAE drift",
+            f"{drift['MAE drift']:+.2f} pp",
+            delta_color="inverse",
+        )
+        drift_columns[1].metric(
+            "Direction drift",
+            f"{drift['Direction drift']:+.1f} pp",
+        )
+        drift_columns[2].metric(
+            "Brier drift",
+            f"{drift['Brier drift']:+.3f}",
+            delta_color="inverse",
+        )
+        drift_columns[3].metric(
+            "Coverage drift",
+            f"{drift['Coverage drift']:+.1f} pp",
+        )
+    with st.expander("Stored market-model run history"):
+        model_history_display = model_history.rename(
+            columns={
+                "as_of": "As of",
+                "candidate_tickers": "Candidates",
+                "evaluation_dates": "Evaluation dates",
+                "evaluation_mae": "Evaluation MAE",
+                "baseline_mae": "Baseline MAE",
+                "directional_accuracy": "Directional accuracy",
+                "probability_brier": "Probability Brier",
+                "interval_coverage_80": "80% interval coverage",
+                "selection_mean_excess": "Top-10 mean excess",
+                "selection_hit_rate": "Top-10 hit rate",
+                "sentiment_observed_rows": "Sentiment rows",
+            }
+        )
+        st.dataframe(
+            model_history_display.drop(columns=["model_weights_json"]),
+            hide_index=True,
+            width="stretch",
+        )
 
 
 @st.fragment(run_every=f"{LIVE_CHART_REFRESH_SECONDS}s")

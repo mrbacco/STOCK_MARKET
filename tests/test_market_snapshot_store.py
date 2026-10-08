@@ -121,7 +121,7 @@ class MarketSnapshotStoreTest(unittest.TestCase):
 
     def test_realtime_forecast_input_stays_fixed_inside_five_minute_bucket(self):
         """Minute-by-minute chart redraws should not refit an active model bar."""
-        from views import prepare_realtime_forecast_history
+        from chart_pipeline import prepare_realtime_forecast_history
 
         base = pd.Timestamp("2026-07-23 14:00:00")
         first = _sample_history(periods=65)

@@ -14,6 +14,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+import chart_pipeline
 import market_data
 import sentiment_service
 import sentiment_store
@@ -59,13 +60,14 @@ class PredictionRankingUiTest(unittest.TestCase):
             "us": market_data.get_us_top_performers,
             "history": market_data.get_price_history_batch,
             "views_history": views.get_price_history_batch,
+            "pipeline_history": chart_pipeline.get_price_history_batch,
             "collector": sentiment_service.ensure_background_sentiment_collector,
             "watchlist": sentiment_store.update_watchlist,
             "status": sentiment_store.get_collector_status,
-            "sentiment": views.load_sentiment_history,
-            "resolve": views.resolve_pending_forecasts,
-            "record_forecast": views.record_forecast,
-            "record_run": views.record_market_model_run,
+            "sentiment": chart_pipeline.load_sentiment_history,
+            "resolve": chart_pipeline.resolve_pending_forecasts,
+            "record_forecast": chart_pipeline.record_forecast,
+            "record_run": chart_pipeline.record_market_model_run,
             "quality": views.load_forecast_quality,
             "history_runs": views.load_market_model_history,
         }
@@ -89,16 +91,17 @@ class PredictionRankingUiTest(unittest.TestCase):
         }
         # ``views`` imports the loader directly, so patch that bound reference too.
         views.get_price_history_batch = market_data.get_price_history_batch
+        chart_pipeline.get_price_history_batch = market_data.get_price_history_batch
         sentiment_service.ensure_background_sentiment_collector = lambda: None
         sentiment_store.update_watchlist = lambda company_by_ticker: None
         sentiment_store.get_collector_status = lambda: {
             "article_count": 0,
             "watchlist_count": 0,
         }
-        views.load_sentiment_history = lambda ticker: pd.DataFrame()
-        views.resolve_pending_forecasts = lambda price_data, market_source: 0
-        views.record_forecast = lambda **kwargs: None
-        views.record_market_model_run = lambda *args, **kwargs: None
+        chart_pipeline.load_sentiment_history = lambda ticker: pd.DataFrame()
+        chart_pipeline.resolve_pending_forecasts = lambda price_data, market_source: 0
+        chart_pipeline.record_forecast = lambda **kwargs: None
+        chart_pipeline.record_market_model_run = lambda *args, **kwargs: None
         views.load_forecast_quality = lambda *args, **kwargs: pd.DataFrame()
         views.load_market_model_history = lambda *args, **kwargs: pd.DataFrame()
 
@@ -110,13 +113,14 @@ class PredictionRankingUiTest(unittest.TestCase):
         market_data.get_us_top_performers = cls.originals["us"]
         market_data.get_price_history_batch = cls.originals["history"]
         views.get_price_history_batch = cls.originals["views_history"]
+        chart_pipeline.get_price_history_batch = cls.originals["pipeline_history"]
         sentiment_service.ensure_background_sentiment_collector = cls.originals["collector"]
         sentiment_store.update_watchlist = cls.originals["watchlist"]
         sentiment_store.get_collector_status = cls.originals["status"]
-        views.load_sentiment_history = cls.originals["sentiment"]
-        views.resolve_pending_forecasts = cls.originals["resolve"]
-        views.record_forecast = cls.originals["record_forecast"]
-        views.record_market_model_run = cls.originals["record_run"]
+        chart_pipeline.load_sentiment_history = cls.originals["sentiment"]
+        chart_pipeline.resolve_pending_forecasts = cls.originals["resolve"]
+        chart_pipeline.record_forecast = cls.originals["record_forecast"]
+        chart_pipeline.record_market_model_run = cls.originals["record_run"]
         views.load_forecast_quality = cls.originals["quality"]
         views.load_market_model_history = cls.originals["history_runs"]
 
