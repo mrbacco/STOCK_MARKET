@@ -112,10 +112,3 @@ def database_connection(
         raise
     finally:
         connection.close()
-
-
-def configured_database_backend(explicit_sqlite_path: str | Path | None = None) -> str:
-    """Return a safe backend label for health captions and BAC_LOG output."""
-    backend = "postgresql" if DATABASE_URL and explicit_sqlite_path is None else "sqlite"
-    bac_log_kv("database.backend", backend=backend)
-    return backend

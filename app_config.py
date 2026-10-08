@@ -136,8 +136,6 @@ SENTIMENT_FEATURE_COLUMNS = (
     "event_intensity_24h",
 )
 
-MODEL_FEATURE_COLUMNS = (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
-
 # Cross-sectional context lets the market-wide model distinguish a stock's own
 # momentum from a move shared by the whole selected exchange.  These names are
 # centralized because training, inference, diagnostics, and tests all rely on

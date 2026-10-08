@@ -139,28 +139,6 @@ YFINANCE_CACHE_DIRECTORY = configure_yfinance_cache()
 SINGLE_TICKER_FALLBACK_LIMIT = 10
 
 
-def parse_tickers(raw: str) -> List[str]:
-    """Normalize comma-separated tickers and preserve the user's original order."""
-    bac_log_kv("market_data.parse_tickers", raw_input=raw)
-
-    parts = [part.strip().upper() for part in raw.split(",") if part.strip()]
-
-    # Duplicate removal happens after normalization so "aapl" and "AAPL" collapse.
-    seen = set()
-    clean_tickers: list[str] = []
-    for ticker in parts:
-        if ticker not in seen:
-            seen.add(ticker)
-            clean_tickers.append(ticker)
-
-    bac_log_list_preview(
-        "market_data.parse_tickers",
-        "normalized_tickers",
-        clean_tickers,
-    )
-    return clean_tickers
-
-
 def format_price_history(history: pd.DataFrame) -> pd.DataFrame:
     """Standardize yfinance history output to the columns the app expects."""
     bac_log_kv(
@@ -367,50 +345,6 @@ def _fetch_single_price_history_from_provider(
         if not formatted.empty
         else formatted
     )
-
-
-@st.cache_data(ttl=60, max_entries=100)
-def get_price_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """Fetch history for one ticker.
-
-    This function remains available for targeted debugging and ad-hoc expansion,
-    even though the current UI primarily uses the batch loader.
-    """
-    bac_log_kv(
-        "market_data.get_price_history",
-        ticker=ticker,
-        period=period,
-        interval=interval,
-    )
-    try:
-        formatted = _fetch_single_price_history_from_provider(
-            ticker,
-            period,
-            interval,
-            "single-price-history",
-        )
-    except Exception as ex:
-        bac_log_kv(
-            "market_data.get_price_history",
-            ticker=ticker,
-            status="provider_failed",
-            error_type=type(ex).__name__,
-            error=str(ex),
-        )
-        formatted = pd.DataFrame()
-
-    if not formatted.empty:
-        _save_price_snapshot_safely(ticker, period, interval, formatted)
-    else:
-        formatted = _load_price_snapshot_safely(ticker, period, interval)
-
-    bac_log_kv(
-        "market_data.get_price_history",
-        ticker=ticker,
-        formatted_rows=len(formatted),
-        data_status=formatted.attrs.get("bac_data_status", "unavailable"),
-    )
-    return formatted
 
 
 def _compute_price_history_batch(

@@ -14,8 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 RUN groupadd --system app && useradd --system --gid app --create-home app
 
-COPY requirements.txt ./
-RUN python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+# The lockfile pins every transitive dependency and selects the CPU-only
+# PyTorch wheel, so the image does not download CUDA libraries it never uses.
+COPY requirements.lock ./
+RUN python -m pip install --upgrade pip && python -m pip install -r requirements.lock
 
 COPY . .
 RUN mkdir -p /app/data && chown -R app:app /app

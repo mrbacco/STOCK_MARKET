@@ -111,6 +111,16 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+`requirements.txt` lists the direct dependencies. `requirements.lock` pins the
+full Linux dependency set (with the CPU-only PyTorch wheel) that the Docker
+image and CI install; its header shows how to regenerate it.
+
+Run the offline test suite with:
+
+```bash
+python -m unittest discover -s tests
+```
+
 ### 4. Run the app
 
 ```bash
