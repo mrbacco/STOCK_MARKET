@@ -21,6 +21,22 @@ from database import database_connection
 from provider_runtime import call_provider
 
 
+def _dated_history(periods: int = 30) -> pd.DataFrame:
+    """Return a small daily OHLCV frame dated well in the past."""
+    dates = pd.date_range("2026-01-01", periods=periods, freq="D")
+    closes = [100.0 + index for index in range(periods)]
+    return pd.DataFrame(
+        {
+            "Date": dates,
+            "Open": closes,
+            "High": closes,
+            "Low": closes,
+            "Close": closes,
+            "Volume": 1_000_000.0,
+        }
+    )
+
+
 class ScalabilityRuntimeTest(unittest.TestCase):
     def test_cache_generation_invalidation_is_scoped(self):
         """Refreshing one market must not invalidate an unrelated market."""
@@ -79,21 +95,14 @@ class ScalabilityRuntimeTest(unittest.TestCase):
         """A cold curve must not leave Streamlit waiting for a nonexistent rerun."""
         history = pd.DataFrame({"Date": [pd.Timestamp("2026-01-01")], "Close": [100.0]})
         expected = pd.DataFrame({"pred_close": [101.0]})
-        forecasting._forecast_feature_model_cached.clear()
+        forecasting.forecast_feature_model.cache_clear()
         with patch.object(
-            forecasting,
+            cache_control,
             "shared_cache_get_or_compute",
             return_value=expected,
         ) as shared_cache:
-            result = forecasting._forecast_feature_model_cached(
-                history,
-                3,
-                None,
-                False,
-                "NYSE",
-                0,
-            )
-        forecasting._forecast_feature_model_cached.clear()
+            result = forecasting.forecast_feature_model(history, 3)
+        forecasting.forecast_feature_model.cache_clear()
 
         pd.testing.assert_frame_equal(result, expected)
         self.assertTrue(shared_cache.call_args.kwargs["allow_compute"])
@@ -124,13 +133,11 @@ class ScalabilityRuntimeTest(unittest.TestCase):
                 "Volume": [1_000_000.0],
             }
         )
-        with (
-            patch.object(forecasting, "get_cache_generation", return_value=0),
-            patch.object(
-                forecasting,
-                "_forecast_feature_model_cached",
-                side_effect=RuntimeError("broken model artifact"),
-            ),
+        forecasting.forecast_feature_model.cache_clear()
+        with patch.object(
+            cache_control,
+            "shared_cache_get_or_compute",
+            side_effect=RuntimeError("broken model artifact"),
         ):
             result = forecasting.forecast_feature_model(history, points_ahead=3)
 
@@ -142,6 +149,91 @@ class ScalabilityRuntimeTest(unittest.TestCase):
 
         self.assertEqual("invalid_history", diagnosis["status"])
         self.assertIn("market-data provider", diagnosis["message"])
+
+
+    def test_shared_cache_key_ignores_provenance_and_forming_bar(self):
+        """A re-download of the same history must address the same shared entry."""
+        first = _dated_history()
+        first.attrs["bac_fetched_at"] = "2026-07-23T12:00:00+00:00"
+        redownload = first.copy()
+        redownload.attrs["bac_fetched_at"] = "2026-07-23T12:01:00+00:00"
+        redownload.loc[redownload.index[-1], "Close"] += 0.5
+
+        stable = lambda frame: cache_control._material_digest(frame, stable=True)
+        exact = lambda frame: cache_control._material_digest(frame, stable=False)
+        self.assertEqual(stable(first), stable(redownload))
+        self.assertNotEqual(exact(first), exact(redownload))
+
+        revised_history = first.copy()
+        revised_history.loc[revised_history.index[0], "Close"] += 1.0
+        next_session = pd.concat([first, first.tail(1).assign(Date=pd.Timestamp("2026-02-01"))])
+        self.assertNotEqual(stable(first), stable(revised_history))
+        self.assertNotEqual(stable(first), stable(next_session))
+
+    def test_read_only_miss_queues_named_arguments_and_degrades(self):
+        """A cold read-only entry is queued once by name and returns the fallback."""
+        computed = []
+
+        @cache_control.cached_result(
+            "test-read-only",
+            ttl_seconds=60,
+            max_entries=4,
+            allow_compute=False,
+            on_failure=lambda: "pending",
+        )
+        def expensive(history, horizon=3):
+            computed.append(horizon)
+            return "ready"
+
+        with (
+            patch.object(cache_control, "get_redis_client", return_value=None),
+            patch.object(cache_control, "enqueue_analytics_job") as enqueue,
+        ):
+            result = expensive(_dated_history())
+
+        self.assertEqual("pending", result)
+        self.assertEqual([], computed)
+        job_type, _scope, arguments = enqueue.call_args.args
+        self.assertEqual("test-read-only", job_type)
+        self.assertEqual({"history", "horizon"}, set(arguments))
+
+    def test_local_cache_returns_independent_copies(self):
+        """Mutating a cached result must not leak into the next caller."""
+        calls = []
+
+        @cache_control.cached_result(
+            "test-local-copy",
+            ttl_seconds=60,
+            max_entries=4,
+            shared=False,
+        )
+        def load(ticker):
+            calls.append(ticker)
+            return {ticker: _dated_history()}
+
+        first = load("AAA")
+        first["AAA"].attrs["bac_data_status"] = "provider_stale"
+        second = load("AAA")
+
+        self.assertEqual(["AAA"], calls)
+        self.assertNotIn("bac_data_status", second["AAA"].attrs)
+
+    def test_stale_histories_are_excluded_from_the_rankable_pool(self):
+        """Web and worker must rank the same fresh-only candidate pool."""
+        fresh = _dated_history()
+        recovered = _dated_history()
+        recovered.attrs["bac_data_status"] = "last_known_good"
+        frozen = _dated_history()
+        frozen.attrs["bac_data_status"] = "live"
+
+        health = market_data.classify_price_histories(
+            {"FRESH": fresh, "RECOVERED": recovered, "FROZEN": frozen, "EMPTY": pd.DataFrame()},
+            realtime_mode=False,
+        )
+
+        self.assertEqual(["FRESH"], health.live_tickers)
+        self.assertEqual(["RECOVERED", "FROZEN"], health.stale_tickers)
+        self.assertEqual("provider_stale", frozen.attrs["bac_data_status"])
 
 
 if __name__ == "__main__":

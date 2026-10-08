@@ -12,7 +12,6 @@ from dataclasses import asdict, dataclass
 from threading import Lock
 from typing import Any, Callable, Iterable
 
-import streamlit as st
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from app_config import SENTIMENT_MODEL_NAME
@@ -185,8 +184,15 @@ class FinancialSentimentAnalyzer:
             return scores
 
 
-@st.cache_resource(show_spinner=False)
+_SHARED_ANALYZER: FinancialSentimentAnalyzer | None = None
+_SHARED_ANALYZER_LOCK = Lock()
+
+
 def get_sentiment_analyzer() -> FinancialSentimentAnalyzer:
-    """Load FinBERT once per process and share it across Streamlit reruns."""
-    bac_log_section("sentiment.analyzer", "Loading the shared financial sentiment model.")
-    return FinancialSentimentAnalyzer()
+    """Load FinBERT once per process and share it across reruns and threads."""
+    global _SHARED_ANALYZER
+    with _SHARED_ANALYZER_LOCK:
+        if _SHARED_ANALYZER is None:
+            bac_log_section("sentiment.analyzer", "Loading the shared financial sentiment model.")
+            _SHARED_ANALYZER = FinancialSentimentAnalyzer()
+        return _SHARED_ANALYZER

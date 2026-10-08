@@ -4,26 +4,41 @@
 # file: cache_control.py
 #############################
 
-"""Shared Redis caching, cache generations, and stampede protection.
+"""Result caching, cache generations, and stampede protection.
 
-Streamlit's cache remains the fastest first layer inside one web process.  This
-module adds an optional Redis layer so replicas and standalone workers reuse the
-same expensive market/model results.  Values are compressed pickles because
-the cache is private application infrastructure and must preserve pandas types.
-Never expose this Redis instance to untrusted writers.
+`cached_result` gives data and model functions two cache layers without any
+Streamlit dependency, so web replicas and standalone workers share one code
+path:
+
+- L1 is a bounded in-process TTL cache keyed on the exact argument content.
+- L2 is an optional Redis cache shared by replicas and workers. Its keys use a
+  *stable* fingerprint: a price history is identified by its completed bars and
+  the timestamp of its newest bar, never by pandas ``attrs`` provenance or the
+  still-moving prices of a forming bar. A worker-warmed result therefore stays
+  addressable when a web replica re-downloads the same history a minute later.
+
+Values are compressed pickles because the cache is private application
+infrastructure and must preserve pandas types. Never expose this Redis
+instance to untrusted writers.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import pickle
 import threading
+import time
 import zlib
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any, TypeVar
+
+import pandas as pd
 
 from app_logging import bac_log_kv, bac_log_section
 from runtime_config import CACHE_NAMESPACE, REDIS_URL
@@ -75,8 +90,59 @@ def _namespaced(key: str) -> str:
     return f"{CACHE_NAMESPACE}:{key}"
 
 
-def _material_digest(material: Any) -> str:
-    payload = pickle.dumps(material, protocol=pickle.HIGHEST_PROTOCOL)
+def _pandas_digest(value: pd.DataFrame | pd.Series) -> str:
+    """Hash pandas content only; ``attrs`` provenance never reaches the key."""
+    try:
+        payload = pd.util.hash_pandas_object(value, index=True).to_numpy().tobytes()
+    except TypeError:
+        # Unhashable cells (lists, dicts) fall back to a pickle without attrs.
+        stripped = value.copy(deep=False)
+        stripped.attrs = {}
+        payload = pickle.dumps(stripped, protocol=pickle.HIGHEST_PROTOCOL)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def cache_fingerprint(material: Any, *, stable: bool = False) -> Any:
+    """Reduce cache key material to small, deterministic, picklable values.
+
+    ``stable=False`` identifies the exact content. ``stable=True`` identifies a
+    dated history (a frame with a ``Date`` column) by its completed rows plus
+    the timestamp of its newest row, so a forming bar whose prices move on
+    every download does not create a new shared-cache key.
+    """
+    if isinstance(material, pd.DataFrame):
+        columns = tuple(str(column) for column in material.columns)
+        if stable and "Date" in material.columns and len(material) >= 2:
+            return (
+                "dated-frame",
+                len(material),
+                columns,
+                str(material["Date"].iloc[-1]),
+                _pandas_digest(material.iloc[:-1]),
+            )
+        return ("frame", material.shape, columns, _pandas_digest(material))
+    if isinstance(material, pd.Series):
+        return ("series", len(material), str(material.name), _pandas_digest(material))
+    if isinstance(material, Mapping):
+        return (
+            "mapping",
+            tuple(
+                sorted(
+                    (str(key), cache_fingerprint(value, stable=stable))
+                    for key, value in material.items()
+                )
+            ),
+        )
+    if isinstance(material, (list, tuple)):
+        return ("sequence", tuple(cache_fingerprint(value, stable=stable) for value in material))
+    if isinstance(material, (set, frozenset)):
+        return ("set", tuple(sorted(repr(value) for value in material)))
+    return material
+
+
+def _material_digest(material: Any, *, stable: bool = True) -> str:
+    fingerprint = cache_fingerprint(material, stable=stable)
+    payload = pickle.dumps(fingerprint, protocol=pickle.HIGHEST_PROTOCOL)
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -203,7 +269,7 @@ def shared_cache_get_or_compute(
     """Read a cross-process value, computing it once behind a Redis lock.
 
     With no Redis configured, this deliberately becomes a direct call; the
-    surrounding `st.cache_data` decorator remains the local first-level cache.
+    `cached_result` decorator keeps its process-local first-level cache.
     """
     client = get_redis_client()
     if client is None:
@@ -276,3 +342,128 @@ def shared_cache_get_or_compute(
                 # Redis lock expiry is harmless here: the computed value was
                 # already written and later readers still receive it.
                 pass
+
+
+class _LocalResultCache:
+    """Bounded, thread-safe, process-local TTL cache.
+
+    Values are stored pickled so every caller receives an independent copy,
+    matching `st.cache_data` semantics: mutating a returned DataFrame (for
+    example its ``attrs``) can never corrupt the cached value.
+    """
+
+    def __init__(self, max_entries: int, ttl_seconds: float) -> None:
+        self._max_entries = max(int(max_entries), 1)
+        self._ttl_seconds = max(float(ttl_seconds), 0.0)
+        self._entries: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> tuple[bool, Any]:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return False, None
+            expires_at, payload = entry
+            if expires_at < time.monotonic():
+                del self._entries[key]
+                return False, None
+            self._entries.move_to_end(key)
+        return True, pickle.loads(payload)
+
+    def set(self, key: str, value: Any) -> None:
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        with self._lock:
+            self._entries[key] = (time.monotonic() + self._ttl_seconds, payload)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+def cached_result(
+    namespace: str,
+    *,
+    ttl_seconds: int,
+    max_entries: int,
+    generation: str | None = None,
+    shared: bool = True,
+    allow_compute: bool = True,
+    on_failure: Callable[[], Any] | None = None,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Cache a function in-process (L1) and, optionally, in Redis (L2).
+
+    - ``generation`` ("market" or "model") adds the current scope's generation
+      to every key, so "Refresh now" invalidates only that market scope.
+    - ``allow_compute=False`` makes a read-only web replica raise
+      `SharedCacheMiss` instead of computing an expensive result.
+    - ``on_failure`` turns a failure into a degraded value. A shared-cache miss
+      additionally queues the call for the analytics worker, using the
+      namespace as the job type and the bound arguments as its keywords.
+      Without ``on_failure``, every exception propagates to the caller.
+    """
+
+    def decorate(function: Callable[..., T]) -> Callable[..., T]:
+        signature = inspect.signature(function)
+        local_cache = _LocalResultCache(max_entries, ttl_seconds)
+
+        @functools.wraps(function)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            arguments = dict(bound.arguments)
+            scope = current_cache_scope()
+            cache_generation = (
+                get_cache_generation(f"{generation}:{scope}") if generation else 0
+            )
+            local_key = _material_digest(
+                (namespace, arguments, cache_generation),
+                stable=False,
+            )
+            hit, cached_value = local_cache.get(local_key)
+            if hit:
+                return cached_value
+
+            def compute() -> T:
+                return function(*bound.args, **bound.kwargs)
+
+            try:
+                value = (
+                    shared_cache_get_or_compute(
+                        namespace,
+                        (arguments, cache_generation),
+                        ttl_seconds,
+                        compute,
+                        allow_compute=allow_compute,
+                    )
+                    if shared
+                    else compute()
+                )
+            except SharedCacheMiss as ex:
+                if on_failure is None:
+                    raise
+                enqueue_analytics_job(namespace, scope, arguments)
+                bac_log_kv(f"cache.{namespace}", status="worker_queued", error=str(ex))
+                return on_failure()
+            except Exception as ex:
+                if on_failure is None:
+                    raise
+                # One bad ticker, cache entry, or estimator fit must not take
+                # down the page; the caller renders the degraded value.
+                bac_log_kv(
+                    f"cache.{namespace}",
+                    status="failed",
+                    error_type=type(ex).__name__,
+                    error=str(ex),
+                )
+                return on_failure()
+
+            local_cache.set(local_key, value)
+            return value
+
+        wrapper.cache_clear = local_cache.clear  # type: ignore[attr-defined]
+        return wrapper
+
+    return decorate

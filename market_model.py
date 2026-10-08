@@ -22,7 +22,6 @@ from collections.abc import Callable, Mapping
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
@@ -42,13 +41,7 @@ from app_config import (
     resolve_market_calendar,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
-from cache_control import (
-    SharedCacheMiss,
-    current_cache_scope,
-    enqueue_analytics_job,
-    get_cache_generation,
-    shared_cache_get_or_compute,
-)
+from cache_control import cached_result
 from runtime_config import ANALYTICS_READ_ONLY
 from forecasting import build_feature_frame, prepare_model_history
 
@@ -464,13 +457,26 @@ def _fit_probability_pipeline(
         return default_evaluation, default_latest, np.nan
 
 
-def _compute_rank_market_candidates(
+@cached_result(
+    "market-ranking",
+    ttl_seconds=900,
+    max_entries=24,
+    generation="model",
+    allow_compute=not ANALYTICS_READ_ONLY,
+    # The pooled ranking is an enhancement over the per-ticker forecast curves.
+    # Keep those curves available if an estimator or shared-cache entry fails.
+    on_failure=_empty_ranking_result,
+)
+def rank_market_candidates(
     price_data: Mapping[str, pd.DataFrame],
     forecast_horizon: int,
     sentiment_by_ticker: Mapping[str, pd.DataFrame] | None = None,
     top_n: int = 10,
 ) -> dict[str, object]:
-    """Fit the pooled ensemble and rank the strongest current candidates."""
+    """Fit the pooled ensemble and rank the strongest current candidates.
+
+    Read-only web replicas serve worker-warmed rankings and queue cold ones.
+    """
     bac_log_section("market_model.rank_market_candidates", "Pooled ranking started.")
     panel = build_market_panel(price_data, forecast_horizon, sentiment_by_ticker)
     if panel.empty:
@@ -677,72 +683,3 @@ def _compute_rank_market_candidates(
         "selection_backtest": selection_by_date.reset_index(),
         "diagnostics": diagnostics,
     }
-
-
-@st.cache_data(ttl="15m", max_entries=24)
-def _rank_market_candidates_cached(
-    price_data: Mapping[str, pd.DataFrame],
-    forecast_horizon: int,
-    sentiment_by_ticker: Mapping[str, pd.DataFrame] | None,
-    top_n: int,
-    cache_generation: int,
-) -> dict[str, object]:
-    """Use process and Redis cache layers around the pooled model fitting path."""
-    return shared_cache_get_or_compute(
-        "market-ranking",
-        (
-            price_data,
-            forecast_horizon,
-            sentiment_by_ticker,
-            top_n,
-            cache_generation,
-        ),
-        900,
-        lambda: _compute_rank_market_candidates(
-            price_data,
-            forecast_horizon,
-            sentiment_by_ticker,
-            top_n,
-        ),
-        allow_compute=not ANALYTICS_READ_ONLY,
-    )
-
-
-def rank_market_candidates(
-    price_data: Mapping[str, pd.DataFrame],
-    forecast_horizon: int,
-    sentiment_by_ticker: Mapping[str, pd.DataFrame] | None = None,
-    top_n: int = 10,
-) -> dict[str, object]:
-    """Read worker-precomputed ranking results or compute them in local mode."""
-    generation = get_cache_generation(f"model:{current_cache_scope()}")
-    try:
-        return _rank_market_candidates_cached(
-            price_data,
-            forecast_horizon,
-            sentiment_by_ticker,
-            top_n,
-            generation,
-        )
-    except SharedCacheMiss as ex:
-        scope = current_cache_scope()
-        enqueue_analytics_job(
-            "market-ranking",
-            scope,
-            (price_data, forecast_horizon, sentiment_by_ticker, top_n),
-        )
-        bac_log_kv("market_model.rank_market_candidates", status="worker_queued", error=str(ex))
-        return _empty_ranking_result()
-    except Exception as ex:
-        # The pooled ranking is an enhancement over the per-ticker forecast
-        # curves. Keep those curves available if a cross-sectional estimator or
-        # shared-cache entry fails, while preserving the exact failure in logs.
-        bac_log_kv(
-            "market_model.rank_market_candidates",
-            status="failed",
-            error_type=type(ex).__name__,
-            error=str(ex),
-            candidate_tickers=len(price_data),
-            forecast_horizon=forecast_horizon,
-        )
-        return _empty_ranking_result()

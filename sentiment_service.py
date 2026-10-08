@@ -21,7 +21,6 @@ from urllib.parse import quote_plus
 import feedparser
 import pandas as pd
 import requests
-import streamlit as st
 
 from app_config import (
     SENTIMENT_COLLECTION_INTERVAL_SECONDS,
@@ -282,7 +281,14 @@ class BackgroundSentimentCollector:
         bac_log_section("sentiment.background", "Collector thread stopped.")
 
 
-@st.cache_resource(show_spinner=False)
+_BACKGROUND_COLLECTOR: BackgroundSentimentCollector | None = None
+_BACKGROUND_COLLECTOR_LOCK = threading.Lock()
+
+
 def ensure_background_sentiment_collector() -> BackgroundSentimentCollector:
-    """Start exactly one collector per Streamlit process."""
-    return BackgroundSentimentCollector()
+    """Start exactly one collector per process, restarting it if it died."""
+    global _BACKGROUND_COLLECTOR
+    with _BACKGROUND_COLLECTOR_LOCK:
+        if _BACKGROUND_COLLECTOR is None or not _BACKGROUND_COLLECTOR.is_alive:
+            _BACKGROUND_COLLECTOR = BackgroundSentimentCollector()
+        return _BACKGROUND_COLLECTOR

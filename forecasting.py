@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -34,13 +33,7 @@ from app_config import (
     SENTIMENT_FEATURE_COLUMNS,
 )
 from app_logging import bac_log_kv, bac_log_section
-from cache_control import (
-    SharedCacheMiss,
-    current_cache_scope,
-    enqueue_analytics_job,
-    get_cache_generation,
-    shared_cache_get_or_compute,
-)
+from cache_control import cached_result
 from runtime_config import ANALYTICS_READ_ONLY
 from sentiment_features import build_sentiment_feature_frame, has_sufficient_sentiment_history
 
@@ -425,14 +418,31 @@ def diagnose_forecast_readiness(
         return diagnosis
 
 
-def _compute_forecast_feature_model(
+@cached_result(
+    "forecast-curve",
+    ttl_seconds=300,
+    max_entries=100,
+    generation="model",
+    # A forecast curve is the primary chart output and is inexpensive compared
+    # with the walk-forward backtest. Returning an empty frame on a cold
+    # production cache made the page look permanently broken because Streamlit
+    # had no event that would rerun it after the worker finished. The Redis lock
+    # still prevents horizontally scaled replicas from stampeding the model.
+    allow_compute=True,
+    # The caller diagnoses an empty frame and renders a ticker-level warning.
+    on_failure=pd.DataFrame,
+)
+def forecast_feature_model(
     price_history: pd.DataFrame,
     points_ahead: int = 30,
     sentiment_history: pd.DataFrame | None = None,
     include_sentiment: bool = False,
     market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
-    """Build a forward curve while reusing one point-in-time feature matrix."""
+    """Build a forward curve while reusing one point-in-time feature matrix.
+
+    Results are cached per market scope; a failure returns an empty frame.
+    """
     bac_log_kv("forecast.forecast_feature_model", points_ahead=points_ahead, history_rows=len(price_history))
     history = prepare_model_history(price_history)
     if history.empty:
@@ -497,95 +507,17 @@ def _compute_forecast_feature_model(
     return result
 
 
-@st.cache_data(ttl="5m", max_entries=100)
-def _forecast_feature_model_cached(
-    price_history: pd.DataFrame,
-    points_ahead: int,
-    sentiment_history: pd.DataFrame | None,
-    include_sentiment: bool,
-    market_calendar: str,
-    cache_generation: int,
-) -> pd.DataFrame:
-    return shared_cache_get_or_compute(
-        "forecast-curve",
-        (
-            price_history,
-            points_ahead,
-            sentiment_history,
-            include_sentiment,
-            market_calendar,
-            cache_generation,
-        ),
-        300,
-        lambda: _compute_forecast_feature_model(
-            price_history,
-            points_ahead,
-            sentiment_history,
-            include_sentiment,
-            market_calendar,
-        ),
-        # A forecast curve is the primary chart output and is inexpensive
-        # compared with the walk-forward backtest. Returning an empty frame on
-        # a cold production cache made the page look permanently broken because
-        # Streamlit had no event that would rerun it after the worker finished.
-        #
-        # Always permit this lightweight calculation on the requesting replica.
-        # The Redis lock inside shared_cache_get_or_compute still guarantees
-        # that horizontally scaled replicas do not stampede the model.
-        allow_compute=True,
-    )
-
-
-def forecast_feature_model(
-    price_history: pd.DataFrame,
-    points_ahead: int = 30,
-    sentiment_history: pd.DataFrame | None = None,
-    include_sentiment: bool = False,
-    market_calendar: str = "NYSE",
-) -> pd.DataFrame:
-    """Return a shared forecast immediately, computing a cold curve if needed."""
-    generation = get_cache_generation(f"model:{current_cache_scope()}")
-    try:
-        return _forecast_feature_model_cached(
-            price_history,
-            points_ahead,
-            sentiment_history,
-            include_sentiment,
-            market_calendar,
-            generation,
-        )
-    except SharedCacheMiss as ex:
-        scope = current_cache_scope()
-        enqueue_analytics_job(
-            "forecast-curve",
-            scope,
-            (
-                price_history,
-                points_ahead,
-                sentiment_history,
-                include_sentiment,
-                market_calendar,
-            ),
-        )
-        bac_log_kv("forecast.forecast_feature_model", status="worker_queued", error=str(ex))
-        return pd.DataFrame()
-    except Exception as ex:
-        # One bad ticker, cache entry, or estimator fit must not take down the
-        # entire Streamlit charts page. The caller diagnoses the empty frame and
-        # renders an explicit ticker-level warning.
-        bac_log_kv(
-            "forecast.forecast_feature_model",
-            status="failed",
-            error_type=type(ex).__name__,
-            error=str(ex),
-            history_rows=len(price_history),
-            points_ahead=points_ahead,
-            include_sentiment=include_sentiment,
-        )
-        return pd.DataFrame()
-
-
-def _compute_backtest_forecast_model(
+@cached_result(
+    "forecast-backtest",
+    ttl_seconds=300,
+    max_entries=100,
+    generation="model",
+    allow_compute=not ANALYTICS_READ_ONLY,
+    # Backtest availability affects confidence bands, not the ability to
+    # publish the current point forecast, so failures degrade to no bands.
+    on_failure=pd.DataFrame,
+)
+def backtest_forecast_model(
     price_history: pd.DataFrame,
     forecast_horizon: int,
     training_points: int = BACKTEST_TRAINING_POINTS,
@@ -594,7 +526,10 @@ def _compute_backtest_forecast_model(
     include_sentiment: bool = False,
     market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
-    """Run a walk-forward backtest that matches the user-selected forecast horizon."""
+    """Run a walk-forward backtest that matches the user-selected forecast horizon.
+
+    Read-only web replicas serve worker-warmed results and queue cold ones.
+    """
     bac_log_kv(
         "forecast.backtest_forecast_model",
         history_rows=len(price_history),
@@ -714,98 +649,6 @@ def _compute_backtest_forecast_model(
 
     bac_log_kv("forecast.backtest_forecast_model", result_rows=len(result))
     return result.reset_index(drop=True)
-
-
-@st.cache_data(ttl="5m", max_entries=100)
-def _backtest_forecast_model_cached(
-    price_history: pd.DataFrame,
-    forecast_horizon: int,
-    training_points: int,
-    max_test_points: int,
-    sentiment_history: pd.DataFrame | None,
-    include_sentiment: bool,
-    market_calendar: str,
-    cache_generation: int,
-) -> pd.DataFrame:
-    return shared_cache_get_or_compute(
-        "forecast-backtest",
-        (
-            price_history,
-            forecast_horizon,
-            training_points,
-            max_test_points,
-            sentiment_history,
-            include_sentiment,
-            market_calendar,
-            cache_generation,
-        ),
-        300,
-        lambda: _compute_backtest_forecast_model(
-            price_history,
-            forecast_horizon,
-            training_points,
-            max_test_points,
-            sentiment_history,
-            include_sentiment,
-            market_calendar,
-        ),
-        allow_compute=not ANALYTICS_READ_ONLY,
-    )
-
-
-def backtest_forecast_model(
-    price_history: pd.DataFrame,
-    forecast_horizon: int,
-    training_points: int = BACKTEST_TRAINING_POINTS,
-    max_test_points: int = MAX_BACKTEST_POINTS,
-    sentiment_history: pd.DataFrame | None = None,
-    include_sentiment: bool = False,
-    market_calendar: str = "NYSE",
-) -> pd.DataFrame:
-    """Read a worker-warmed walk-forward test or compute it in local mode."""
-    generation = get_cache_generation(f"model:{current_cache_scope()}")
-    try:
-        return _backtest_forecast_model_cached(
-            price_history,
-            forecast_horizon,
-            training_points,
-            max_test_points,
-            sentiment_history,
-            include_sentiment,
-            market_calendar,
-            generation,
-        )
-    except SharedCacheMiss as ex:
-        scope = current_cache_scope()
-        enqueue_analytics_job(
-            "forecast-backtest",
-            scope,
-            (
-                price_history,
-                forecast_horizon,
-                training_points,
-                max_test_points,
-                sentiment_history,
-                include_sentiment,
-                market_calendar,
-            ),
-        )
-        bac_log_kv("forecast.backtest_forecast_model", status="worker_queued", error=str(ex))
-        return pd.DataFrame()
-    except Exception as ex:
-        # Backtest availability affects confidence bands, not the ability to
-        # publish the current point forecast. Degrade to an uncalibrated curve
-        # and keep the failure visible in structured logs.
-        bac_log_kv(
-            "forecast.backtest_forecast_model",
-            status="failed",
-            error_type=type(ex).__name__,
-            error=str(ex),
-            history_rows=len(price_history),
-            forecast_horizon=forecast_horizon,
-            include_sentiment=include_sentiment,
-        )
-        return pd.DataFrame()
 
 
 def add_forecast_intervals(

@@ -52,7 +52,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - Visualization: Plotly.
 - Sentiment analysis: ProsusAI FinBERT through Transformers, with vaderSentiment fallback.
 - Production persistence: PostgreSQL, with SQLite in `data/` as the zero-configuration local fallback.
-- Shared cache and distributed locks: Redis, with bounded Streamlit process caches as L1.
+- Shared cache and distributed locks: Redis, with bounded in-process TTL caches as L1 (`cache_control.cached_result`).
 - Production processes: stateless Streamlit replicas, one sentiment worker, and one analytics precomputation worker.
 
 ## Repository Structure

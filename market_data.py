@@ -14,6 +14,7 @@ mixing those concerns into the Streamlit layout code.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import tempfile
@@ -21,7 +22,6 @@ from typing import List, Mapping
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 import yfinance as yf
 
 from app_config import (
@@ -32,11 +32,7 @@ from app_config import (
     US_SCREENER_QUERY,
 )
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
-from cache_control import (
-    current_cache_scope,
-    get_cache_generation,
-    shared_cache_get_or_compute,
-)
+from cache_control import cached_result
 from market_snapshot_store import (
     load_price_history_snapshot,
     save_price_history_snapshot,
@@ -243,6 +239,55 @@ def assess_price_history_freshness(
         realtime_mode=realtime_mode,
     )
     return diagnosis
+
+
+@dataclass(frozen=True)
+class PriceDataHealth:
+    """Which histories are fresh enough to train on, and why the rest are not."""
+
+    live_tickers: list[str]
+    stale_tickers: list[str]
+    freshness_by_ticker: dict[str, dict[str, object]]
+
+
+def classify_price_histories(
+    price_data: Mapping[str, pd.DataFrame],
+    *,
+    realtime_mode: bool,
+) -> PriceDataHealth:
+    """Split non-empty histories into fresh and stale/recovered sets.
+
+    Only provider-tagged histories receive wall-clock freshness gating.
+    Deterministic tests and caller-supplied dataframes intentionally have no
+    provider metadata and remain usable as explicit offline inputs. A live
+    history that is too old is re-tagged ``provider_stale`` in place so later
+    stages label its forecast as recovery output.
+
+    The web tier and the analytics worker both rank only ``live_tickers``, so
+    their shared-cache keys address the same candidate pool.
+    """
+    valid_tickers = [ticker for ticker, frame in price_data.items() if not frame.empty]
+    freshness_by_ticker = {
+        ticker: assess_price_history_freshness(
+            price_data[ticker],
+            realtime_mode=realtime_mode,
+        )
+        for ticker in valid_tickers
+    }
+    stale_tickers: list[str] = []
+    for ticker in valid_tickers:
+        provider_status = price_data[ticker].attrs.get("bac_data_status")
+        freshness_status = freshness_by_ticker[ticker]["status"]
+        if provider_status == "last_known_good" or (
+            provider_status == "live" and freshness_status != "fresh"
+        ):
+            stale_tickers.append(ticker)
+            if provider_status != "last_known_good":
+                price_data[ticker].attrs["bac_data_status"] = "provider_stale"
+    live_tickers = [ticker for ticker in valid_tickers if ticker not in stale_tickers]
+    bac_log_list_preview("market_data.data_health", "live_tickers", live_tickers)
+    bac_log_list_preview("market_data.data_health", "stale_tickers", stale_tickers)
+    return PriceDataHealth(live_tickers, stale_tickers, freshness_by_ticker)
 
 
 def _save_price_snapshot_safely(
@@ -528,30 +573,19 @@ def _compute_price_history_batch(
     return result
 
 
-@st.cache_data(ttl=30, max_entries=100)
-def _get_price_history_batch_cached(
-    tickers: List[str],
-    period: str,
-    interval: str,
-    cache_generation: int,
-) -> dict[str, pd.DataFrame]:
-    """Use Streamlit as L1 and Redis as a cross-replica L2 data cache."""
-    return shared_cache_get_or_compute(
-        "price-history-batch",
-        (tuple(tickers), period, interval, cache_generation),
-        30,
-        lambda: _compute_price_history_batch(tickers, period, interval),
-    )
-
-
+@cached_result(
+    "price-history-batch",
+    ttl_seconds=30,
+    max_entries=100,
+    generation="market",
+)
 def get_price_history_batch(
     tickers: List[str],
     period: str,
     interval: str,
 ) -> dict[str, pd.DataFrame]:
     """Fetch histories with targeted generation invalidation for this market."""
-    generation = get_cache_generation(f"market:{current_cache_scope()}")
-    return _get_price_history_batch_cached(tickers, period, interval, generation)
+    return _compute_price_history_batch(list(tickers), period, interval)
 
 
 def _compute_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
@@ -631,19 +665,15 @@ def _compute_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.Data
     return result
 
 
-@st.cache_data(ttl=60, max_entries=8)
-def _get_us_top_performers_cached(limit: int, cache_generation: int) -> pd.DataFrame:
-    return shared_cache_get_or_compute(
-        "us-top-performers",
-        (limit, cache_generation),
-        60,
-        lambda: _compute_us_top_performers(limit),
-    )
-
-
+@cached_result(
+    "us-top-performers",
+    ttl_seconds=60,
+    max_entries=8,
+    generation="market",
+)
 def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    generation = get_cache_generation(f"market:{current_cache_scope()}")
-    return _get_us_top_performers_cached(limit, generation)
+    """Return the cached U.S. daily-gainers screen for this market scope."""
+    return _compute_us_top_performers(limit)
 
 
 def _rank_latest_daily_performers(
@@ -718,8 +748,16 @@ def _rank_latest_daily_performers(
     return result
 
 
-@st.cache_data(ttl=300, max_entries=8)
-def _get_iseq20_top_performers_cached(limit: int, cache_generation: int) -> pd.DataFrame:
+# The fixed-universe rankings are cheap to rebuild from the shared price-batch
+# cache, so they stay process-local rather than adding another Redis entry.
+@cached_result(
+    "iseq20-top-performers",
+    ttl_seconds=300,
+    max_entries=8,
+    generation="market",
+    shared=False,
+)
+def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
     """Rank the fixed Ireland universe by the latest daily change."""
     return _rank_latest_daily_performers(
         ISEQ_20_DUBLIN_LISTINGS,
@@ -728,13 +766,14 @@ def _get_iseq20_top_performers_cached(limit: int, cache_generation: int) -> pd.D
     )
 
 
-def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    generation = get_cache_generation(f"market:{current_cache_scope()}")
-    return _get_iseq20_top_performers_cached(limit, generation)
-
-
-@st.cache_data(ttl=300, max_entries=8)
-def _get_ftse_mib_top_performers_cached(limit: int, cache_generation: int) -> pd.DataFrame:
+@cached_result(
+    "ftse-mib-top-performers",
+    ttl_seconds=300,
+    max_entries=8,
+    generation="market",
+    shared=False,
+)
+def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
     """Rank Yahoo-supported FTSE MIB constituents by latest daily change."""
     return _rank_latest_daily_performers(
         FTSE_MIB_MILAN_LISTINGS,
@@ -743,12 +782,7 @@ def _get_ftse_mib_top_performers_cached(limit: int, cache_generation: int) -> pd
     )
 
 
-def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    generation = get_cache_generation(f"market:{current_cache_scope()}")
-    return _get_ftse_mib_top_performers_cached(limit, generation)
-
-
-@st.cache_data(ttl=60, max_entries=200)
+@cached_result("news", ttl_seconds=60, max_entries=200, shared=False)
 def get_news(ticker: str, company_name: str = "", max_items: int = 20) -> pd.DataFrame:
     """Collect current headlines and return persistent financial sentiment."""
     bac_log_kv(

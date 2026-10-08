@@ -44,7 +44,7 @@ from forecasting import (
 )
 from market_model import rank_market_candidates
 from market_data import (
-    assess_price_history_freshness,
+    classify_price_histories,
     get_price_history_batch,
     growth_score,
     load_news_frames_parallel,
@@ -353,37 +353,13 @@ def render_charts_view(
         )
         st.stop()
 
-    freshness_by_ticker = {
-        ticker: assess_price_history_freshness(
-            price_data[ticker],
-            realtime_mode=realtime_mode,
-        )
-        for ticker in valid_tickers
-    }
-    stale_tickers = []
-    for ticker in valid_tickers:
-        provider_status = price_data[ticker].attrs.get("bac_data_status")
-        freshness_status = freshness_by_ticker[ticker]["status"]
-        # Only provider-tagged histories receive wall-clock freshness gating.
-        # Deterministic tests and caller-supplied dataframes intentionally have
-        # no provider metadata and remain usable as explicit offline inputs.
-        if provider_status == "last_known_good" or (
-            provider_status == "live" and freshness_status != "fresh"
-        ):
-            stale_tickers.append(ticker)
-            if provider_status != "last_known_good":
-                price_data[ticker].attrs["bac_data_status"] = "provider_stale"
-    live_tickers = [ticker for ticker in valid_tickers if ticker not in stale_tickers]
-    bac_log_list_preview(
-        "views.render_charts_view.data_health",
-        "live_tickers",
-        live_tickers,
+    health = classify_price_histories(
+        {ticker: price_data[ticker] for ticker in valid_tickers},
+        realtime_mode=realtime_mode,
     )
-    bac_log_list_preview(
-        "views.render_charts_view.data_health",
-        "last_known_good_tickers",
-        stale_tickers,
-    )
+    live_tickers = health.live_tickers
+    stale_tickers = health.stale_tickers
+    freshness_by_ticker = health.freshness_by_ticker
     if stale_tickers:
         stale_details = ", ".join(
             (

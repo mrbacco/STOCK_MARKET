@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import pandas as pd
 
@@ -36,6 +36,7 @@ from cache_control import (
 )
 from forecasting import backtest_forecast_model, forecast_feature_model
 from market_data import (
+    classify_price_histories,
     get_ftse_mib_top_performers,
     get_iseq20_top_performers,
     get_price_history_batch,
@@ -73,11 +74,10 @@ def precompute_market(source: str, period: str, horizon: int) -> dict[str, int]:
     performers = MARKET_LOADERS[source]()
     tickers = performers.get("Ticker", pd.Series(dtype=str)).astype(str).tolist()
     price_data = get_price_history_batch(tickers, period=period, interval="1d")
-    valid_price_data = {
-        ticker: frame
-        for ticker, frame in price_data.items()
-        if not frame.empty
-    }
+    # Rank exactly the candidate pool the web tier ranks (fresh histories only)
+    # so both processes address the same shared-cache entry.
+    health = classify_price_histories(price_data, realtime_mode=False)
+    valid_price_data = {ticker: price_data[ticker] for ticker in health.live_tickers}
     sentiment_by_ticker = {
         ticker: load_sentiment_history(ticker)
         for ticker in valid_price_data
@@ -148,13 +148,18 @@ def process_requested_jobs(limit: int = 10) -> int:
     for job in jobs:
         job_type = str(job.get("job_type", ""))
         scope = str(job.get("scope", "default"))
-        arguments = job.get("arguments", ())
+        arguments = job.get("arguments", {})
         set_cache_scope(scope)
         try:
             handler = handlers.get(job_type)
             if handler is None:
                 raise ValueError(f"Unsupported analytics job type: {job_type}")
-            handler(*arguments)
+            # Jobs carry the cached function's bound arguments by name.
+            # Positional tuples are still accepted from older queue entries.
+            if isinstance(arguments, Mapping):
+                handler(**arguments)
+            else:
+                handler(*arguments)
             bac_log_kv(
                 "analytics.worker.request",
                 job_type=job_type,
