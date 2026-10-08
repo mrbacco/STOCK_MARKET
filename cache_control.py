@@ -400,6 +400,7 @@ def cached_result(
     shared: bool = True,
     allow_compute: bool = True,
     on_failure: Callable[[], Any] | None = None,
+    cache_if: Callable[[Any], bool] | None = None,
 ) -> Callable[[Callable[..., T]], CachedFunction[T]]:
     """Cache a function in-process (L1) and, optionally, in Redis (L2).
 
@@ -411,6 +412,8 @@ def cached_result(
       additionally queues the call for the analytics worker, using the
       namespace as the job type and the bound arguments as its keywords.
       Without ``on_failure``, every exception propagates to the caller.
+    - ``cache_if`` can veto storing a result in the in-process cache, for
+      example a provisional preview that should be recomputed next time.
     """
 
     def decorate(function: Callable[..., T]) -> CachedFunction[T]:
@@ -468,7 +471,8 @@ def cached_result(
                 )
                 return on_failure()
 
-            local_cache.set(local_key, value)
+            if cache_if is None or cache_if(value):
+                local_cache.set(local_key, value)
             return value
 
         wrapper.cache_clear = local_cache.clear  # type: ignore[attr-defined]

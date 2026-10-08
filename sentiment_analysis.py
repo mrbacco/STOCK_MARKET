@@ -46,10 +46,8 @@ def normalize_finbert_scores(
     positive = probabilities.get("positive", 0.0)
     neutral = probabilities.get("neutral", 0.0)
     negative = probabilities.get("negative", 0.0)
-    label = max(
-        {"Positive": positive, "Neutral": neutral, "Negative": negative},
-        key={"Positive": positive, "Neutral": neutral, "Negative": negative}.get,
-    )
+    probability_by_label = {"Positive": positive, "Neutral": neutral, "Negative": negative}
+    label = max(probability_by_label, key=lambda name: probability_by_label[name])
     score = SentimentScore(
         label=label,
         sentiment=positive - negative,
@@ -65,6 +63,16 @@ def normalize_finbert_scores(
         sentiment=score.sentiment,
     )
     return score
+
+
+def _model_is_cached(model_name: str) -> bool:
+    """Return True when the model's config is already in the local Hub cache."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        return isinstance(try_to_load_from_cache(model_name, "config.json"), str)
+    except Exception:
+        return False
 
 
 class FinancialSentimentAnalyzer:
@@ -86,12 +94,7 @@ class FinancialSentimentAnalyzer:
                 from transformers import pipeline
 
                 pipeline_factory = pipeline
-            self._pipeline = pipeline_factory(
-                "text-classification",
-                model=model_name,
-                tokenizer=model_name,
-                device=-1,
-            )
+            self._pipeline = self._load_pipeline(pipeline_factory, model_name)
             bac_log_kv("sentiment.analyzer", model=model_name, status="finbert_ready")
         except Exception as ex:
             self.load_error = str(ex)
@@ -101,6 +104,35 @@ class FinancialSentimentAnalyzer:
                 status="vader_fallback",
                 error=self.load_error,
             )
+
+    @staticmethod
+    def _load_pipeline(pipeline_factory: Callable[..., Any], model_name: str) -> Any:
+        """Build the classifier, skipping the Hugging Face Hub when cached.
+
+        A cached model loads with ``local_files_only`` so startup does not wait
+        on Hub metadata requests (about two seconds per load). An incomplete
+        cache retries online, which also downloads the missing files.
+        """
+        arguments = {
+            "model": model_name,
+            "tokenizer": model_name,
+            "device": -1,
+        }
+        if _model_is_cached(model_name):
+            try:
+                return pipeline_factory(
+                    "text-classification",
+                    local_files_only=True,
+                    **arguments,
+                )
+            except Exception as ex:
+                bac_log_kv(
+                    "sentiment.analyzer",
+                    model=model_name,
+                    status="local_load_failed_retrying_online",
+                    error=str(ex),
+                )
+        return pipeline_factory("text-classification", **arguments)
 
     @property
     def active_model_name(self) -> str:

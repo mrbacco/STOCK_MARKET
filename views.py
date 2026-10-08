@@ -15,7 +15,7 @@ this module only decides how their results are displayed.
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import TYPE_CHECKING, Any, List
 
 import numpy as np
 import pandas as pd
@@ -27,21 +27,11 @@ from app_config import (
     MAX_BACKTEST_POINTS,
     MAX_CHARTED_PERFORMERS,
     MIN_BACKTEST_POINTS,
+    REALTIME_MODEL_REFRESH_FREQUENCY,
     selected_horizon_label,
 )
 from app_logging import bac_debug_kv, bac_log_kv, bac_log_list_preview, bac_log_section
 from cache_control import set_cache_scope
-from chart_pipeline import (
-    REALTIME_MODEL_REFRESH_FREQUENCY,
-    MarketRankingResult,
-    TickerForecast,
-    build_ticker_forecast,
-    load_chart_prices,
-    rank_live_candidates,
-    record_displayed_forecast,
-    resolve_matured_forecasts,
-    select_charted_tickers,
-)
 from market_data import (
     PriceDataHealth,
     classify_price_histories,
@@ -57,6 +47,9 @@ from model_monitoring import (
     load_market_model_history,
 )
 from runtime_config import ANALYTICS_READ_ONLY, LIVE_CHART_REFRESH_SECONDS
+
+if TYPE_CHECKING:
+    from chart_pipeline import MarketRankingResult, TickerForecast
 
 
 def _leaderboard_column_config(
@@ -221,6 +214,10 @@ def render_charts_view(
     price_format: str,
 ) -> None:
     """Render the heavier charting and forecasting page."""
+    # Imported here so the Overview and News pages never pay for scikit-learn,
+    # the forecasting models, or exchange calendars (several seconds cold).
+    import chart_pipeline
+
     bac_log_kv(
         "views.render_charts_view",
         ticker_source=ticker_source,
@@ -246,7 +243,7 @@ def render_charts_view(
         st.info(f"Charting the first {MAX_CHARTED_PERFORMERS} selected symbols.")
 
     with st.spinner("Loading price history for charting..."):
-        prices = load_chart_prices(
+        prices = chart_pipeline.load_chart_prices(
             candidate_tickers,
             period=period,
             interval=interval,
@@ -275,23 +272,23 @@ def render_charts_view(
     _render_data_health(health, price_data)
 
     monitoring_market = str(ticker_source or "Manual tickers")
-    resolved_forecasts = resolve_matured_forecasts(price_data, health, monitoring_market)
+    resolved_forecasts = chart_pipeline.resolve_matured_forecasts(price_data, health, monitoring_market)
     if resolved_forecasts:
         st.toast(f"Resolved {resolved_forecasts} earlier forecast observations.")
 
-    ranking = MarketRankingResult()
+    ranking = chart_pipeline.MarketRankingResult()
     if automatic_daily_ranking and len(health.live_tickers) >= 2:
         with st.spinner(
             "Training the market-wide ensemble and ranking forward opportunities..."
         ):
-            ranking = rank_live_candidates(
+            ranking = chart_pipeline.rank_live_candidates(
                 price_data,
                 health,
                 forecast_horizon=forecast_points,
                 monitoring_market=monitoring_market,
             )
 
-    selection = select_charted_tickers(
+    selection = chart_pipeline.select_charted_tickers(
         market_source=market_source,
         ranking=ranking.ranking,
         candidate_tickers=candidate_tickers,
@@ -339,7 +336,7 @@ def render_charts_view(
 
     forecasts: list[TickerForecast] = []
     for ticker in selection.tickers:
-        forecast = build_ticker_forecast(
+        forecast = chart_pipeline.build_ticker_forecast(
             ticker,
             price_data[ticker],
             ticker_source=ticker_source,
@@ -348,7 +345,7 @@ def render_charts_view(
             forecast_points=forecast_points,
             preloaded_sentiment=ranking.sentiment_by_ticker.get(ticker),
         )
-        record_displayed_forecast(
+        chart_pipeline.record_displayed_forecast(
             forecast,
             monitoring_market=monitoring_market,
             ranking=ranking.ranking,

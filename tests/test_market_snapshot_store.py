@@ -87,8 +87,8 @@ class MarketSnapshotStoreTest(unittest.TestCase):
             ),
             patch.object(
                 market_data,
-                "_load_price_snapshot_safely",
-                return_value=stale,
+                "_load_price_snapshots_safely",
+                return_value={"AAPL": stale},
             ) as load_snapshot,
         ):
             result = market_data._compute_price_history_batch(
@@ -102,7 +102,7 @@ class MarketSnapshotStoreTest(unittest.TestCase):
             "last_known_good",
             result["AAPL"].attrs["bac_data_status"],
         )
-        load_snapshot.assert_called_once_with("AAPL", "1y", "1d")
+        load_snapshot.assert_called_once_with(["AAPL"], "1y", "1d")
 
     def test_freshness_detects_a_frozen_provider_payload(self):
         """Very old bars must not be presented as a current forecast origin."""

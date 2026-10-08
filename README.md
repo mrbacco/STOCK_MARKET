@@ -251,6 +251,13 @@ comparisons do not guarantee future returns.
 - Severe bar staleness is shown in the Charts data-health strip. Recovery
   forecasts remain visible but are not recorded as fresh production forecasts.
 - For best responsiveness in real-time mode, track a small number of symbols.
+- On the first Ireland or Italy leaderboard after startup, recent saved prices
+  (up to `SNAPSHOT_PREVIEW_MAX_AGE_HOURS`, default 12) are shown immediately
+  with a "saved at" note while live prices download; the page updates itself
+  when they arrive. Set the value to `0` to always wait for live prices.
+- The in-process sentiment collector waits `SENTIMENT_STARTUP_DELAY_SECONDS`
+  (default 30) before its first cycle so loading FinBERT does not slow the first
+  page. A cached FinBERT model loads without contacting the Hugging Face Hub.
 - Your ability to buy a listed security depends on your broker account, market access, and personal tax circumstances; this app does not determine investment eligibility.
 
 ## Security and Privacy

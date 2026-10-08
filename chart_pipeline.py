@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from app_config import MAX_CHARTED_PERFORMERS
+from app_config import MAX_CHARTED_PERFORMERS, REALTIME_MODEL_REFRESH_FREQUENCY
 from app_logging import bac_debug_kv, bac_log_kv, bac_log_list_preview, bac_log_section
 from forecasting import (
     add_forecast_intervals,
@@ -56,12 +56,6 @@ from model_monitoring import (
     resolve_pending_forecasts,
 )
 from sentiment_store import load_sentiment_history
-
-# Live prices can change each minute, but refitting and walk-forward testing
-# every model on each poll would create unnecessary CPU load. The model uses
-# only bars before the currently active five-minute bucket; the solid observed
-# line still displays every price bar returned by the provider.
-REALTIME_MODEL_REFRESH_FREQUENCY = "5min"
 
 PRICE_ONLY_MODEL = "Price only"
 SENTIMENT_MODEL = "Price + sentiment"

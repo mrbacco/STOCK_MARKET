@@ -37,7 +37,11 @@ from app_logging import (
     bac_log_section,
 )
 from cache_control import invalidate_market_scope, set_cache_scope
-from market_data import company_names_by_ticker
+from market_data import (
+    SNAPSHOT_PREVIEW_STATUS,
+    company_names_by_ticker,
+    snapshot_refresh_pending,
+)
 from market_sources import get_market_source
 from sentiment_service import ensure_background_sentiment_collector
 from sentiment_store import get_collector_status, update_watchlist
@@ -62,6 +66,21 @@ st.set_page_config(
     page_icon=":material/query_stats:",
     layout="wide",
 )
+
+
+@st.fragment(run_every="2s")
+def await_live_leaderboard(saved_at: str | None) -> None:
+    """Rerun the page once background live prices have replaced the preview."""
+    if not snapshot_refresh_pending():
+        st.rerun()
+    saved_time = (
+        pd.Timestamp(saved_at).strftime("%H:%M UTC") if saved_at else "an earlier session"
+    )
+    st.caption(
+        f":orange[Showing prices saved at {saved_time} while live prices load.] "
+        "The page updates automatically."
+    )
+
 
 # This first log line makes it easy to spot the start of a brand-new rerun.
 bac_log_section("app", "Streamlit script booting.")
@@ -293,6 +312,9 @@ bac_debug_kv(
     manual_market=manual_market_label if ticker_source == MANUAL_SOURCE else None,
 )
 bac_debug_list_preview("app.tickers", "resolved_tickers", tickers)
+if detected_performers.attrs.get("bac_data_status") == SNAPSHOT_PREVIEW_STATUS:
+    # First load after startup: saved prices are shown while live ones download.
+    await_live_leaderboard(detected_performers.attrs.get("bac_fetched_at"))
 
 if realtime_mode:
     if live_updates_enabled:

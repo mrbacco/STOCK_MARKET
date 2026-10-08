@@ -14,11 +14,13 @@ mixing those concerns into the Streamlit layout code.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import contextvars
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import tempfile
-from typing import Iterable, List, Mapping
+import threading
+from typing import Iterable, List, Mapping, cast
 
 import numpy as np
 import pandas as pd
@@ -39,10 +41,11 @@ from app_logging import (
     bac_log_list_preview,
     bac_log_section,
 )
-from cache_control import cached_result
+from cache_control import cached_result, current_cache_scope
 from market_snapshot_store import (
-    load_price_history_snapshot,
-    save_price_history_snapshot,
+    PriceSnapshot,
+    load_price_history_snapshots,
+    save_price_history_snapshots,
 )
 from marketstack_provider import fetch_marketstack_history
 from provider_runtime import call_provider
@@ -53,6 +56,7 @@ from runtime_config import (
     MARKET_DATA_LICENSE_CONFIRMED,
     MARKET_DATA_PROVIDER,
     RUN_IN_PROCESS_SENTIMENT,
+    SNAPSHOT_PREVIEW_MAX_AGE_HOURS,
     YAHOO_MIN_INTERVAL_SECONDS,
 )
 from sentiment_service import collect_tickers_once
@@ -297,52 +301,75 @@ def classify_price_histories(
     return PriceDataHealth(live_tickers, stale_tickers, freshness_by_ticker)
 
 
-def _save_price_snapshot_safely(
-    ticker: str,
-    period: str,
-    interval: str,
-    history: pd.DataFrame,
-) -> None:
+def _save_price_snapshots_safely(snapshots: list[PriceSnapshot]) -> None:
     """Persist recovery data without letting a disk issue block live prices."""
+    if not snapshots:
+        return
     try:
-        save_price_history_snapshot(
-            ticker,
-            period,
-            interval,
-            history,
-            fetched_at=history.attrs.get("bac_fetched_at"),
-        )
+        save_price_history_snapshots(snapshots)
     except Exception as ex:
         bac_log_kv(
             "market_data.snapshot",
-            ticker=ticker,
-            period=period,
-            interval=interval,
+            snapshots=len(snapshots),
             status="save_failed",
             error_type=type(ex).__name__,
             error=str(ex),
         )
 
 
-def _load_price_snapshot_safely(
-    ticker: str,
+def _load_price_snapshots_safely(
+    tickers: List[str],
     period: str,
     interval: str,
-) -> pd.DataFrame:
-    """Return the last complete history when the provider cannot serve one."""
+) -> dict[str, pd.DataFrame]:
+    """Return last complete histories, keyed by the requested ticker spelling."""
     try:
-        return load_price_history_snapshot(ticker, period, interval)
+        snapshots = load_price_history_snapshots(tickers, period, interval)
     except Exception as ex:
         bac_log_kv(
             "market_data.snapshot",
-            ticker=ticker,
+            tickers=len(tickers),
             period=period,
             interval=interval,
             status="load_failed",
             error_type=type(ex).__name__,
             error=str(ex),
         )
-        return pd.DataFrame()
+        return {}
+    return {
+        ticker: snapshots[ticker.upper()]
+        for ticker in tickers
+        if ticker.upper() in snapshots
+    }
+
+
+def _persist_and_backfill_snapshots(
+    result: dict[str, pd.DataFrame],
+    period: str,
+    interval: str,
+) -> None:
+    """Save every fresh history, then fill empty ones from their last snapshot.
+
+    Fresh frames are saved before stale fallbacks load, and a snapshot is only
+    ever replaced by a complete, non-empty history. Both steps are single
+    database round trips regardless of how many tickers are involved.
+    """
+    _save_price_snapshots_safely(
+        [
+            PriceSnapshot(
+                ticker,
+                period,
+                interval,
+                history,
+                fetched_at=history.attrs.get("bac_fetched_at"),
+            )
+            for ticker, history in result.items()
+            if not history.empty and history.attrs.get("bac_data_status") == "live"
+        ]
+    )
+    missing_tickers = [ticker for ticker, history in result.items() if history.empty]
+    if missing_tickers:
+        result.update(_load_price_snapshots_safely(missing_tickers, period, interval))
 
 
 def _fetch_single_price_history_from_provider(
@@ -439,15 +466,7 @@ def _compute_price_history_batch(
                     error_type=type(ex).__name__,
                     error=str(ex),
                 )
-        for ticker, history in result.items():
-            if not history.empty:
-                _save_price_snapshot_safely(ticker, period, interval, history)
-            else:
-                result[ticker] = _load_price_snapshot_safely(
-                    ticker,
-                    period,
-                    interval,
-                )
+        _persist_and_backfill_snapshots(result, period, interval)
         return result
 
     data = pd.DataFrame()
@@ -551,15 +570,7 @@ def _compute_price_history_batch(
                 error=str(ex),
             )
 
-    # Persist every fresh frame before loading stale fallbacks. The snapshot is
-    # replaced only by a complete, non-empty history.
-    for ticker, history in result.items():
-        if not history.empty and history.attrs.get("bac_data_status") == "live":
-            _save_price_snapshot_safely(ticker, period, interval, history)
-
-    for ticker in tickers:
-        if result[ticker].empty:
-            result[ticker] = _load_price_snapshot_safely(ticker, period, interval)
+    _persist_and_backfill_snapshots(result, period, interval)
 
     non_empty_tickers = [ticker for ticker, frame in result.items() if not frame.empty]
     stale_tickers = [
@@ -683,6 +694,117 @@ def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame
     return _compute_us_top_performers(limit)
 
 
+# Fixed-universe leaderboards are the first page after startup. Their first
+# load can show recent saved snapshots instantly while live prices download in
+# a background thread, instead of blocking on Yahoo for several seconds.
+SNAPSHOT_PREVIEW_STATUS = "snapshot_preview"
+# Below this share of tickers with a usable snapshot, the preview is skipped.
+SNAPSHOT_PREVIEW_MIN_COVERAGE = 0.8
+_PREVIEW_REFRESH_STATE: dict[tuple, str] = {}
+_PREVIEW_REFRESH_LOCK = threading.Lock()
+
+
+def _snapshot_preview(
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> tuple[dict[str, pd.DataFrame], str] | None:
+    """Return recent saved histories and their oldest fetch time, if usable."""
+    if SNAPSHOT_PREVIEW_MAX_AGE_HOURS <= 0:
+        return None
+    snapshots = _load_price_snapshots_safely(tickers, period, interval)
+    if len(snapshots) < SNAPSHOT_PREVIEW_MIN_COVERAGE * len(tickers):
+        return None
+    fetched_times = pd.to_datetime(
+        [frame.attrs.get("bac_fetched_at") for frame in snapshots.values()],
+        utc=True,
+        errors="coerce",
+    )
+    if fetched_times.isna().any():
+        return None
+    oldest_fetch = cast(pd.Timestamp, fetched_times.min())
+    max_age = pd.Timedelta(hours=SNAPSHOT_PREVIEW_MAX_AGE_HOURS)
+    if pd.Timestamp.now(tz="UTC") - oldest_fetch > max_age:
+        return None
+    return snapshots, oldest_fetch.isoformat()
+
+
+def _refresh_in_background(
+    key: tuple,
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> None:
+    """Download live prices off the request thread and warm the shared caches."""
+    context = contextvars.copy_context()
+
+    def refresh() -> None:
+        try:
+            # Runs in the caller's cache scope, so the warmed entry is exactly
+            # the one the next rerun reads.
+            context.run(get_price_history_batch, tickers, period, interval)
+            bac_log_kv("market_data.snapshot_preview", status="live_prices_ready")
+        except Exception as ex:
+            bac_log_kv(
+                "market_data.snapshot_preview",
+                status="refresh_failed",
+                error_type=type(ex).__name__,
+                error=str(ex),
+            )
+        finally:
+            with _PREVIEW_REFRESH_LOCK:
+                _PREVIEW_REFRESH_STATE[key] = "done"
+
+    threading.Thread(target=refresh, name="leaderboard-refresh", daemon=True).start()
+
+
+def snapshot_refresh_pending() -> bool:
+    """Return True while a leaderboard's live prices are still downloading."""
+    with _PREVIEW_REFRESH_LOCK:
+        return "refreshing" in _PREVIEW_REFRESH_STATE.values()
+
+
+def _leaderboard_histories(
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> tuple[dict[str, pd.DataFrame], str | None]:
+    """Return leaderboard histories and, for a preview, the snapshot fetch time.
+
+    The first request per cache scope uses recent snapshots when available
+    and starts a background download; later requests (and every request once
+    that download finishes) use the normal cached provider path.
+    """
+    key = (current_cache_scope(), tuple(sorted(tickers)), period, interval)
+    with _PREVIEW_REFRESH_LOCK:
+        state = _PREVIEW_REFRESH_STATE.get(key)
+    if state != "done":
+        preview = _snapshot_preview(tickers, period, interval)
+        if preview is not None:
+            with _PREVIEW_REFRESH_LOCK:
+                start_refresh = key not in _PREVIEW_REFRESH_STATE
+                if start_refresh:
+                    _PREVIEW_REFRESH_STATE[key] = "refreshing"
+            if start_refresh:
+                _refresh_in_background(key, tickers, period, interval)
+            snapshots, fetched_at = preview
+            bac_log_kv(
+                "market_data.snapshot_preview",
+                status="served",
+                tickers=len(snapshots),
+                fetched_at=fetched_at,
+            )
+            return snapshots, fetched_at
+        with _PREVIEW_REFRESH_LOCK:
+            _PREVIEW_REFRESH_STATE.setdefault(key, "done")
+    return get_price_history_batch(tickers, period=period, interval=interval), None
+
+
+def _is_live_leaderboard(result: pd.DataFrame) -> bool:
+    """Cache only leaderboards built from live prices, never previews."""
+    return result.attrs.get("bac_data_status") != SNAPSHOT_PREVIEW_STATUS
+
+
 def _rank_latest_daily_performers(
     listings: Mapping[str, str],
     limit: int,
@@ -691,7 +813,7 @@ def _rank_latest_daily_performers(
     """Rank a fixed market universe by its latest two available daily closes."""
     bac_log_kv(log_context, limit=limit, universe_size=len(listings))
     columns = ["Ticker", "Company", "Daily change", "Last price", "Last session"]
-    price_data = get_price_history_batch(
+    price_data, preview_fetched_at = _leaderboard_histories(
         list(listings),
         period="5d",
         interval="1d",
@@ -751,7 +873,10 @@ def _rank_latest_daily_performers(
         if rows
         else pd.DataFrame(columns=columns)
     )
-    bac_log_kv(log_context, result_rows=len(result))
+    if preview_fetched_at is not None:
+        result.attrs["bac_data_status"] = SNAPSHOT_PREVIEW_STATUS
+        result.attrs["bac_fetched_at"] = preview_fetched_at
+    bac_log_kv(log_context, result_rows=len(result), preview=preview_fetched_at is not None)
     return result
 
 
@@ -763,6 +888,7 @@ def _rank_latest_daily_performers(
     max_entries=8,
     generation="market",
     shared=False,
+    cache_if=_is_live_leaderboard,
 )
 def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
     """Rank the fixed Ireland universe by the latest daily change."""
@@ -779,6 +905,7 @@ def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataF
     max_entries=8,
     generation="market",
     shared=False,
+    cache_if=_is_live_leaderboard,
 )
 def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
     """Rank Yahoo-supported FTSE MIB constituents by latest daily change."""

@@ -28,7 +28,7 @@ from app_config import (
 )
 from app_logging import bac_debug_kv, bac_log_kv, bac_log_section
 from provider_runtime import call_provider
-from runtime_config import NEWS_MIN_INTERVAL_SECONDS
+from runtime_config import NEWS_MIN_INTERVAL_SECONDS, SENTIMENT_STARTUP_DELAY_SECONDS
 from sentiment_analysis import get_sentiment_analyzer
 from sentiment_store import (
     existing_content_hashes,
@@ -233,8 +233,10 @@ class BackgroundSentimentCollector:
         self,
         poll_seconds: int = SENTIMENT_COLLECTION_INTERVAL_SECONDS,
         db_path: str | Path | None = None,
+        startup_delay_seconds: float = SENTIMENT_STARTUP_DELAY_SECONDS,
     ) -> None:
         self.poll_seconds = max(int(poll_seconds), 60)
+        self.startup_delay_seconds = max(float(startup_delay_seconds), 0.0)
         self.db_path = db_path
         self._stop_event = threading.Event()
         # A separate wake event lets Streamlit notify the worker immediately
@@ -247,7 +249,12 @@ class BackgroundSentimentCollector:
             daemon=True,
         )
         self._thread.start()
-        bac_log_kv("sentiment.background", status="started", poll_seconds=self.poll_seconds)
+        bac_log_kv(
+            "sentiment.background",
+            status="started",
+            poll_seconds=self.poll_seconds,
+            startup_delay_seconds=self.startup_delay_seconds,
+        )
 
     @property
     def is_alive(self) -> bool:
@@ -263,6 +270,11 @@ class BackgroundSentimentCollector:
         bac_log_section("sentiment.background", "Immediate collection requested.")
 
     def _run(self) -> None:
+        # Let the first page render before any RSS or FinBERT work starts.
+        # Wake-ups requested meanwhile stay set and run right after the delay.
+        if self._stop_event.wait(self.startup_delay_seconds):
+            bac_log_section("sentiment.background", "Collector thread stopped.")
+            return
         while not self._stop_event.is_set():
             try:
                 collect_active_watchlist_once(db_path=self.db_path)

@@ -44,6 +44,11 @@ RUN_IN_PROCESS_SENTIMENT = env_bool(
 # only read those expensive entries.  Local development computes cache misses
 # synchronously so `streamlit run app.py` continues to work by itself.
 ANALYTICS_READ_ONLY = env_bool("ANALYTICS_READ_ONLY", default=False)
+
+# The in-process collector loads FinBERT (~10 s of transformers/torch import)
+# once it finds new headlines. Waiting before its first cycle keeps that CPU
+# burst away from the first page render after `streamlit run app.py`.
+SENTIMENT_STARTUP_DELAY_SECONDS = max(int(os.getenv("SENTIMENT_STARTUP_DELAY_SECONDS", "30")), 0)
 ANALYTICS_INTERVAL_SECONDS = max(
     int(os.getenv("ANALYTICS_INTERVAL_SECONDS", "900")),
     60,
@@ -96,6 +101,14 @@ MARKET_DATA_LICENSE_CONFIRMED = env_bool(
 # Sixty seconds matches the finest useful one-minute bar cadence and avoids
 # wasting provider requests. Clamp custom values so an accidental "1" cannot
 # hammer the public endpoint or keep a lightweight laptop permanently busy.
+# On the first leaderboard load after startup, recent last-known-good snapshots
+# are shown immediately while live prices download in the background. Snapshots
+# older than this are not used as a preview; 0 disables the preview entirely.
+SNAPSHOT_PREVIEW_MAX_AGE_HOURS = max(
+    float(os.getenv("SNAPSHOT_PREVIEW_MAX_AGE_HOURS", "12")),
+    0.0,
+)
+
 LIVE_CHART_REFRESH_SECONDS = min(
     max(int(os.getenv("LIVE_CHART_REFRESH_SECONDS", "60")), 30),
     300,

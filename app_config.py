@@ -55,6 +55,11 @@ MIN_SENTIMENT_TRAINING_BARS = 10
 
 INTRADAY_FREQUENCIES = {"1m": "1min", "2m": "2min", "5m": "5min"}
 
+# Live prices can change each minute, but refitting and walk-forward testing
+# every model on each poll would create unnecessary CPU load. Intraday models
+# use only bars before the currently active bucket of this size.
+REALTIME_MODEL_REFRESH_FREQUENCY = "5min"
+
 # `pandas_market_calendars` identifiers for manual symbols, chosen by Yahoo
 # suffix. Automatic sources register their exchange in `market_sources.py`.
 MARKET_CALENDAR_BY_SUFFIX = {

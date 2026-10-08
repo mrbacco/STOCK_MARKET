@@ -17,7 +17,10 @@ store also works across production replicas without changing this module.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -96,27 +99,31 @@ def _ensure_store(db_path: str | Path | None = None) -> None:
     )
 
 
-def save_price_history_snapshot(
-    ticker: str,
-    period: str,
-    interval: str,
-    history: pd.DataFrame,
-    *,
-    fetched_at: object | None = None,
-    db_path: str | Path | None = None,
-) -> int:
-    """Atomically replace one ticker/period/interval last-known-good snapshot."""
+@dataclass(frozen=True)
+class PriceSnapshot:
+    """One ticker/period/interval history to persist as last-known-good."""
+
+    ticker: str
+    period: str
+    interval: str
+    history: pd.DataFrame
+    fetched_at: object | None = None
+
+
+def _snapshot_rows(snapshot: PriceSnapshot) -> list[tuple]:
+    """Normalize one history into database rows; empty when it is unusable."""
     required = set(SNAPSHOT_REQUIRED_COLUMNS)
+    history = snapshot.history
     if history.empty or not required.issubset(history.columns):
         bac_debug_kv(
             "market_snapshot.save",
-            ticker=ticker,
-            period=period,
-            interval=interval,
+            ticker=snapshot.ticker,
+            period=snapshot.period,
+            interval=snapshot.interval,
             status="skipped_invalid_history",
             rows=len(history),
         )
-        return 0
+        return []
 
     frame = history.loc[:, SNAPSHOT_REQUIRED_COLUMNS].copy()
     frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
@@ -128,16 +135,12 @@ def save_price_history_snapshot(
         .drop_duplicates("Date", keep="last")
     )
     frame["Volume"] = frame["Volume"].fillna(0.0).clip(lower=0.0)
-    if frame.empty:
-        return 0
-
-    normalized_ticker = str(ticker).upper()
-    fetched_text = _utc_iso(fetched_at)
-    rows = [
+    fetched_text = _utc_iso(snapshot.fetched_at)
+    return [
         (
-            normalized_ticker,
-            str(period),
-            str(interval),
+            str(snapshot.ticker).upper(),
+            str(snapshot.period),
+            str(snapshot.interval),
             _bar_timestamp_text(row.Date),
             float(row.Open),
             float(row.High),
@@ -149,73 +152,74 @@ def save_price_history_snapshot(
         for row in frame.itertuples(index=False)
     ]
 
+
+def save_price_history_snapshots(
+    snapshots: Iterable[PriceSnapshot],
+    *,
+    db_path: str | Path | None = None,
+) -> int:
+    """Atomically replace several snapshots in one database transaction.
+
+    One commit for a whole batch avoids a connection and disk sync per
+    ticker. Readers see either every earlier snapshot or every new one.
+    """
+    rows_by_key: dict[tuple[str, str, str], list[tuple]] = {}
+    for snapshot in snapshots:
+        rows = _snapshot_rows(snapshot)
+        if rows:
+            rows_by_key[rows[0][:3]] = rows
+    if not rows_by_key:
+        return 0
+
     _ensure_store(db_path)
     with _connect(db_path) as connection:
-        # Delete and insert occur in one database transaction. Readers therefore
-        # see either the earlier complete snapshot or the new complete snapshot.
-        connection.execute(
-            """
-            DELETE FROM market_price_snapshots
-            WHERE ticker = ? AND period_name = ? AND interval_name = ?
-            """,
-            (normalized_ticker, str(period), str(interval)),
-        )
-        connection.executemany(
-            """
-            INSERT INTO market_price_snapshots (
-                ticker, period_name, interval_name, bar_at,
-                price_open, price_high, price_low, price_close,
-                volume, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+        for key, rows in rows_by_key.items():
+            connection.execute(
+                """
+                DELETE FROM market_price_snapshots
+                WHERE ticker = ? AND period_name = ? AND interval_name = ?
+                """,
+                key,
+            )
+            connection.executemany(
+                """
+                INSERT INTO market_price_snapshots (
+                    ticker, period_name, interval_name, bar_at,
+                    price_open, price_high, price_low, price_close,
+                    volume, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
 
+    saved_rows = sum(len(rows) for rows in rows_by_key.values())
     bac_debug_kv(
         "market_snapshot.save",
-        ticker=normalized_ticker,
-        period=period,
-        interval=interval,
-        rows=len(rows),
-        latest_bar=rows[-1][3],
-        fetched_at=fetched_text,
+        snapshots=len(rows_by_key),
+        rows=saved_rows,
         status="saved",
     )
-    return len(rows)
+    return saved_rows
 
 
-def load_price_history_snapshot(
+def save_price_history_snapshot(
     ticker: str,
     period: str,
     interval: str,
+    history: pd.DataFrame,
     *,
+    fetched_at: object | None = None,
     db_path: str | Path | None = None,
-) -> pd.DataFrame:
-    """Load a stale-but-usable snapshot and attach transparent provenance."""
-    _ensure_store(db_path)
-    normalized_ticker = str(ticker).upper()
-    with _connect(db_path) as connection:
-        rows = connection.execute(
-            """
-            SELECT bar_at, price_open, price_high, price_low, price_close,
-                   volume, fetched_at
-            FROM market_price_snapshots
-            WHERE ticker = ? AND period_name = ? AND interval_name = ?
-            ORDER BY bar_at
-            """,
-            (normalized_ticker, str(period), str(interval)),
-        ).fetchall()
+) -> int:
+    """Atomically replace one ticker/period/interval last-known-good snapshot."""
+    return save_price_history_snapshots(
+        [PriceSnapshot(ticker, period, interval, history, fetched_at)],
+        db_path=db_path,
+    )
 
-    if not rows:
-        bac_debug_kv(
-            "market_snapshot.load",
-            ticker=normalized_ticker,
-            period=period,
-            interval=interval,
-            status="miss",
-        )
-        return pd.DataFrame()
 
+def _snapshot_frame(rows: list[Any]) -> pd.DataFrame:
+    """Convert stored rows into the app's OHLCV frame with provenance attrs."""
     frame = pd.DataFrame([dict(row) for row in rows]).rename(
         columns={
             "bar_at": "Date",
@@ -227,21 +231,66 @@ def load_price_history_snapshot(
         }
     )
     frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
-    fetched_at = str(frame.pop("fetched_at").iloc[-1])
+    fetched_at = str(frame["fetched_at"].iloc[-1])
+    frame = frame.loc[:, SNAPSHOT_REQUIRED_COLUMNS]
 
-    # pandas attrs travel with Streamlit/Redis serialization and allow the view
-    # to label stale inputs without changing every forecasting function's API.
+    # pandas attrs travel with cache serialization and allow the view to label
+    # stale inputs without changing every forecasting function's API.
     frame.attrs["bac_data_status"] = "last_known_good"
     frame.attrs["bac_fetched_at"] = fetched_at
     frame.attrs["bac_latest_bar"] = str(frame["Date"].iloc[-1])
+    return frame
+
+
+def load_price_history_snapshots(
+    tickers: Iterable[str],
+    period: str,
+    interval: str,
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Load several snapshots with one query; missing tickers are omitted."""
+    normalized_tickers = sorted({str(ticker).upper() for ticker in tickers})
+    if not normalized_tickers:
+        return {}
+    _ensure_store(db_path)
+    placeholders = ",".join("?" for _ in normalized_tickers)
+    with _connect(db_path) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT ticker, bar_at, price_open, price_high, price_low, price_close,
+                   volume, fetched_at
+            FROM market_price_snapshots
+            WHERE period_name = ? AND interval_name = ? AND ticker IN ({placeholders})
+            ORDER BY ticker, bar_at
+            """,
+            (str(period), str(interval), *normalized_tickers),
+        ).fetchall()
+
+    rows_by_ticker: dict[str, list[Any]] = {}
+    for row in rows:
+        rows_by_ticker.setdefault(str(row["ticker"]), []).append(row)
+    snapshots = {
+        ticker: _snapshot_frame(ticker_rows)
+        for ticker, ticker_rows in rows_by_ticker.items()
+    }
     bac_debug_kv(
         "market_snapshot.load",
-        ticker=normalized_ticker,
         period=period,
         interval=interval,
-        rows=len(frame),
-        latest_bar=frame.attrs["bac_latest_bar"],
-        fetched_at=fetched_at,
-        status="hit",
+        requested=len(normalized_tickers),
+        found=len(snapshots),
     )
-    return frame.loc[:, SNAPSHOT_REQUIRED_COLUMNS]
+    return snapshots
+
+
+def load_price_history_snapshot(
+    ticker: str,
+    period: str,
+    interval: str,
+    *,
+    db_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Load a stale-but-usable snapshot and attach transparent provenance."""
+    snapshots = load_price_history_snapshots([ticker], period, interval, db_path=db_path)
+    return snapshots.get(str(ticker).upper(), pd.DataFrame())
