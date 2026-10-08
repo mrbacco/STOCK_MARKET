@@ -907,8 +907,8 @@ def rank_market_candidates(
         ["Model score", "Probability outperform"],
         ascending=False,
     ).reset_index(drop=True)
+    # Every stock is ranked; top_n only defines the top-N selection backtest.
     ranking.insert(0, "Rank", np.arange(1, len(ranking) + 1))
-    ranking = ranking.head(max(1, int(top_n))).copy()
 
     evaluation_mae = float(
         mean_absolute_error(

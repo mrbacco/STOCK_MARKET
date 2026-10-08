@@ -138,9 +138,9 @@ class StartupPerformanceTest(unittest.TestCase):
         with patch.object(market_data, "_load_price_snapshots_safely", return_value=stale):
             self.assertIsNone(market_data._snapshot_preview(["AAA"], "5d", "1d"))
 
-    def test_views_import_does_not_load_the_model_stack(self) -> None:
+    def test_app_shell_import_does_not_load_the_model_stack(self) -> None:
         script = (
-            "import sys, views; "
+            "import sys, ui_state, ui_components, global_markets, market_sources; "
             "print('LOADED=' + ','.join(m for m in ('sklearn', 'chart_pipeline', "
             "'pandas_market_calendars') if m in sys.modules))"
         )

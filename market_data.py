@@ -13,26 +13,19 @@ mixing those concerns into the Streamlit layout code.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import contextvars
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import tempfile
 import threading
-from typing import Iterable, List, Mapping, cast
+from typing import List, Mapping, cast
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from app_config import (
-    AUTO_DETECTED_PERFORMERS,
-    FTSE_MIB_MILAN_LISTINGS,
-    ISEQ_20_DUBLIN_LISTINGS,
-    MOMENTUM_PERIODS,
-    US_SCREENER_QUERY,
-)
+from app_config import MOMENTUM_PERIODS
 from app_logging import (
     bac_debug_kv,
     bac_debug_list_preview,
@@ -606,94 +599,6 @@ def get_price_history_batch(
     return _compute_price_history_batch(list(tickers), period, interval)
 
 
-def _compute_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    """Load the Yahoo Finance U.S. daily gainers screener and keep top equities."""
-    bac_debug_kv("market_data.get_us_top_performers", limit=limit)
-    columns = ["Ticker", "Company", "Daily change", "Last price"]
-
-    try:
-        response = call_provider(
-            "yahoo-finance",
-            "us-equity-screener",
-            lambda: yf.screen(US_SCREENER_QUERY, count=max(limit * 3, 30)),
-            minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
-        )
-    except Exception as ex:
-        bac_debug_kv("market_data.get_us_top_performers", screener_error=str(ex))
-        return pd.DataFrame(columns=columns)
-
-    quotes = response.get("quotes", [])
-    bac_debug_kv("market_data.get_us_top_performers", quote_count=len(quotes))
-
-    rows = []
-    seen_tickers = set()
-    for quote in quotes:
-        if quote.get("quoteType") != "EQUITY":
-            continue
-
-        ticker = str(quote.get("symbol", "")).upper()
-        if not ticker or ticker in seen_tickers:
-            continue
-
-        try:
-            daily_change = float(quote.get("regularMarketChangePercent"))
-        except (TypeError, ValueError):
-            bac_debug_kv(
-                "market_data.get_us_top_performers",
-                ticker=ticker,
-                message="Skipped because daily change could not be parsed.",
-            )
-            continue
-
-        if not np.isfinite(daily_change):
-            bac_debug_kv(
-                "market_data.get_us_top_performers",
-                ticker=ticker,
-                message="Skipped because daily change was not finite.",
-            )
-            continue
-
-        try:
-            last_price = float(quote.get("regularMarketPrice"))
-        except (TypeError, ValueError):
-            last_price = np.nan
-
-        company = (
-            quote.get("longName")
-            or quote.get("shortName")
-            or quote.get("displayName")
-            or ticker
-        )
-        rows.append(
-            {
-                "Ticker": ticker,
-                "Company": company,
-                "Daily change": daily_change,
-                "Last price": last_price,
-            }
-        )
-        seen_tickers.add(ticker)
-
-    result = (
-        pd.DataFrame(rows).sort_values("Daily change", ascending=False).head(limit).reset_index(drop=True)
-        if rows
-        else pd.DataFrame(columns=columns)
-    )
-    bac_debug_kv("market_data.get_us_top_performers", result_rows=len(result))
-    return result
-
-
-@cached_result(
-    "us-top-performers",
-    ttl_seconds=60,
-    max_entries=8,
-    generation="market",
-)
-def get_us_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    """Return the cached U.S. daily-gainers screen for this market scope."""
-    return _compute_us_top_performers(limit)
-
-
 # Fixed-universe leaderboards are the first page after startup. Their first
 # load can show recent saved snapshots instantly while live prices download in
 # a background thread, instead of blocking on Yahoo for several seconds.
@@ -880,39 +785,25 @@ def _rank_latest_daily_performers(
     return result
 
 
-# The fixed-universe rankings are cheap to rebuild from the shared price-batch
-# cache, so they stay process-local rather than adding another Redis entry.
+# Leaderboards are cheap to rebuild from the shared price-batch cache, so they
+# stay process-local rather than adding another Redis entry.
 @cached_result(
-    "iseq20-top-performers",
+    "universe-leaderboard",
     ttl_seconds=300,
-    max_entries=8,
+    max_entries=32,
     generation="market",
     shared=False,
     cache_if=_is_live_leaderboard,
 )
-def get_iseq20_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    """Rank the fixed Ireland universe by the latest daily change."""
-    return _rank_latest_daily_performers(
-        ISEQ_20_DUBLIN_LISTINGS,
-        limit,
-        "market_data.get_iseq20_top_performers",
-    )
+def get_universe_leaderboard(universe_key: str) -> pd.DataFrame:
+    """Rank one registered universe by each stock's latest daily change."""
+    from market_sources import MARKET_SOURCE_REGISTRY
 
-
-@cached_result(
-    "ftse-mib-top-performers",
-    ttl_seconds=300,
-    max_entries=8,
-    generation="market",
-    shared=False,
-    cache_if=_is_live_leaderboard,
-)
-def get_ftse_mib_top_performers(limit: int = AUTO_DETECTED_PERFORMERS) -> pd.DataFrame:
-    """Rank Yahoo-supported FTSE MIB constituents by latest daily change."""
+    source = MARKET_SOURCE_REGISTRY[universe_key]
     return _rank_latest_daily_performers(
-        FTSE_MIB_MILAN_LISTINGS,
-        limit,
-        "market_data.get_ftse_mib_top_performers",
+        source.listings,
+        len(source.listings),
+        f"market_data.leaderboard.{universe_key}",
     )
 
 
@@ -939,26 +830,6 @@ def get_news(ticker: str, company_name: str = "", max_items: int = 20) -> pd.Dat
     return result
 
 
-def company_names_by_ticker(
-    performers: pd.DataFrame,
-    tickers: Iterable[str] = (),
-) -> dict[str, str]:
-    """Map tickers to company names; unknown tickers fall back to themselves.
-
-    Company names improve Google News queries, and the fallback keeps custom
-    manual symbols searchable by their ticker.
-    """
-    names: dict[str, str] = {}
-    if not performers.empty and {"Ticker", "Company"}.issubset(performers.columns):
-        names = {
-            str(ticker): str(company)
-            for ticker, company in zip(performers["Ticker"], performers["Company"])
-        }
-    for ticker in tickers:
-        names.setdefault(str(ticker), str(ticker))
-    return names
-
-
 def growth_score(df: pd.DataFrame, periods: int = MOMENTUM_PERIODS) -> float:
     """Compute a simple percentage-change score over the requested lookback window."""
     bac_debug_kv("market_data.growth_score", rows=len(df), periods=periods)
@@ -975,65 +846,3 @@ def growth_score(df: pd.DataFrame, periods: int = MOMENTUM_PERIODS) -> float:
     score = ((end - start) / start) * 100.0
     bac_debug_kv("market_data.growth_score", start=float(start), end=float(end), score=score)
     return score
-
-
-def momentum_label(realtime_mode: bool, interval: str) -> str:
-    """Describe the momentum lookback in words that match the current mode."""
-    label = f"{MOMENTUM_PERIODS}-bar ({interval})" if realtime_mode else f"{MOMENTUM_PERIODS}-session"
-    bac_debug_kv(
-        "market_data.momentum_label",
-        realtime_mode=realtime_mode,
-        interval=interval,
-        label=label,
-    )
-    return label
-
-
-def load_news_frames_parallel(
-    tickers: List[str],
-    company_by_ticker: dict[str, str],
-) -> list[pd.DataFrame]:
-    """Fetch headline frames in parallel so the News view stays responsive."""
-    bac_debug_list_preview("market_data.load_news_frames_parallel", "tickers", tickers)
-    if not tickers:
-        bac_debug_section("market_data.load_news_frames_parallel", "No tickers were supplied.")
-        return []
-
-    news_frames: list[pd.DataFrame] = []
-    max_workers = min(4, len(tickers))
-    bac_debug_kv("market_data.load_news_frames_parallel", max_workers=max_workers)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(get_news, ticker, company_by_ticker.get(ticker, "")): ticker
-            for ticker in tickers
-        }
-        bac_debug_kv(
-            "market_data.load_news_frames_parallel",
-            submitted_jobs=len(futures),
-        )
-        for future in as_completed(futures):
-            ticker = futures[future]
-            try:
-                news_df = future.result()
-            except Exception as ex:
-                bac_debug_kv(
-                    "market_data.load_news_frames_parallel",
-                    ticker=ticker,
-                    news_error=str(ex),
-                )
-                continue
-
-            bac_debug_kv(
-                "market_data.load_news_frames_parallel",
-                ticker=ticker,
-                fetched_rows=len(news_df),
-            )
-            if not news_df.empty:
-                news_frames.append(news_df)
-
-    bac_debug_kv(
-        "market_data.load_news_frames_parallel",
-        non_empty_frames=len(news_frames),
-    )
-    return news_frames

@@ -15,8 +15,7 @@ import numpy as np
 import pandas as pd
 
 import chart_pipeline
-from app_config import FTSE_MIB_SOURCE, MANUAL_SOURCE
-from market_sources import get_market_source
+from market_sources import WATCHLIST_KEY
 
 
 def _daily_history(periods: int = 260, seed: int = 11) -> pd.DataFrame:
@@ -59,30 +58,11 @@ class ChartPipelineTest(unittest.TestCase):
         self.assertEqual(5, prices.forecast_points)
         self.assertEqual(["AAA"], prices.valid_tickers)
 
-    def test_automatic_source_without_ranking_keeps_daily_order(self) -> None:
-        performers = pd.DataFrame(
-            {"Ticker": ["B", "A", "C"], "Daily change": [3.5, 2.0, 1.0]}
-        )
-        selection = chart_pipeline.select_charted_tickers(
-            market_source=get_market_source(FTSE_MIB_SOURCE),
-            ranking=pd.DataFrame(),
-            candidate_tickers=["B", "A", "C"],
-            valid_tickers=["A", "B"],
-            detected_performers=performers,
-            price_data={},
-            realtime_mode=False,
-            interval="1d",
-        )
-
-        self.assertEqual(["B", "A"], selection.tickers)
-        self.assertEqual("Top FTSE MIB daily mover", selection.leader_label)
-        self.assertEqual("3.50%", selection.performance_value)
-
     def test_ticker_forecast_is_ready_with_bands_and_backtest_row(self) -> None:
         forecast = chart_pipeline.build_ticker_forecast(
             "AAA",
             _daily_history(),
-            ticker_source=MANUAL_SOURCE,
+            ticker_source=WATCHLIST_KEY,
             realtime_mode=False,
             interval="1d",
             forecast_points=3,
@@ -103,7 +83,7 @@ class ChartPipelineTest(unittest.TestCase):
         forecast = chart_pipeline.build_ticker_forecast(
             "AAA",
             _daily_history(25),
-            ticker_source=MANUAL_SOURCE,
+            ticker_source=WATCHLIST_KEY,
             realtime_mode=False,
             interval="1d",
             forecast_points=3,
@@ -120,7 +100,7 @@ class ChartPipelineTest(unittest.TestCase):
         forecast = chart_pipeline.build_ticker_forecast(
             "AAA",
             history,
-            ticker_source=MANUAL_SOURCE,
+            ticker_source=WATCHLIST_KEY,
             realtime_mode=False,
             interval="1d",
             forecast_points=3,
@@ -131,7 +111,7 @@ class ChartPipelineTest(unittest.TestCase):
         stale = chart_pipeline.build_ticker_forecast(
             "AAA",
             stale_history,
-            ticker_source=MANUAL_SOURCE,
+            ticker_source=WATCHLIST_KEY,
             realtime_mode=False,
             interval="1d",
             forecast_points=3,

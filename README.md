@@ -10,38 +10,43 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 ## Project Goals
 
-- Evaluate a broad market candidate pool and chart the ten strongest forward predictions automatically.
-- Collect current investing-related news headlines.
-- Score headline sentiment to estimate short-term market mood.
-- Visualize momentum and trend projections for top performers.
-- Provide a manual-refresh real-time workflow for intraday monitoring.
+- See global markets at a glance: indices, volatility, rates, currencies, commodities, crypto, and
+  ten tracked stock universes.
+- Rank each universe with a pooled model, and show buy/avoid signals only when out-of-sample
+  evidence supports them.
+- Study any stock in depth: price, a calibrated projection, the model's view, and news sentiment.
+- Measure what following the model would have earned after trading costs.
 
 ## Current Features
 
-- Public price data via Yahoo Finance.
-- Automatic market-wide top-10 prediction ranking for tracked Ireland, Italy, and U.S. sources.
-- Ireland ranking from a tracked ISEQ 20 Euronext Dublin universe.
-- Italy ranking across 39 Yahoo-supported FTSE MIB constituents.
-- U.S. large-cap daily-gainers ranking through Yahoo Finance.
-- Manual ticker selection by geographical market, with searchable examples and custom Yahoo Finance symbols.
-- Separate Overview, Charts, and News views so heavier content loads only when selected.
-- Intraday mode with manual refresh controls.
-- Historical mode for reliable long-range visualization.
-- News aggregation from Google News RSS.
-- Finance-specific FinBERT sentiment scoring with an automatic VADER fallback.
-- Five-minute worker collection with deduplicated PostgreSQL or local SQLite history.
-- Point-in-time sentiment with exchange-close cutoffs, recency decay, source quality, relevance, novelty, event intensity, negative share, and volume shocks.
-- A pooled Ridge, Elastic Net, and histogram-gradient-boosting ensemble with market context, relative strength, beta, breadth, volatility, and liquidity features.
-- Horizon-embargoed tuning/evaluation periods, paired sentiment promotion, calibrated outperformance probability, model agreement, and abstention signals.
-- Forecast 50% and 80% uncertainty intervals plus exchange-aware future sessions and intraday bars.
-- Rank IC (daily rank correlation between predicted and realized order) on the untouched evaluation period.
-- An optional LightGBM LambdaRank ensemble member that joins only when it improves the tuning period's rank IC.
-- Market-ranking bands scaled by each stock's GARCH excess-return volatility and kept on target by adaptive conformal inference.
-- Persistent production monitoring for rolling MAE, return MAE, directional accuracy, interval coverage, volatility regime, and model-run drift.
-- Top grower ranking using recent performance.
-- Interactive charts for close price and feature-based forecasts.
-- Walk-forward backtests for the trend projection, including error and baseline metrics.
-- Terminal logging with BAC_LOG entries for observability.
+- **Global markets page:** 39 instruments (world indices, VIX/VXN, US Treasury yields, major
+  currencies, commodities, Bitcoin and Ether) with 1D/1W/1M/YTD/1Y changes, 20-day volatility,
+  and 3-month sparklines; breadth and median performance of every stock universe; the biggest
+  gainers and decliners across all universes. It loads in the background, showing recent saved
+  prices first.
+- **Ten fixed stock universes (317 stocks):** Dow Jones 30, Nasdaq-100 leaders, Euro Stoxx 50,
+  FTSE 100 leaders, DAX 40, CAC 40, FTSE MIB, ISEQ 20, Nikkei 225 leaders, and Hang Seng
+  leaders, plus a persistent personal watchlist that accepts any Yahoo Finance symbol.
+- **Market ranking page:** the pooled ensemble's ranking of the whole universe, preceded by an
+  evidence verdict (supported, tentative, or no demonstrated edge) based on rank IC, its
+  t-statistic, and top-10 realized excess return. Signals appear only when evidence is supported.
+- **Stock page:** price history with a 50%/80% projection band, the model's rank and band for the
+  stock, a daily sentiment trend with recent FinBERT-scored headlines, and optional intraday bars.
+- **Portfolio page:** a non-overlapping top-N strategy backtest on the untouched evaluation period
+  with a trading-cost slider, a bottom-N control, information ratio, hit rate, drawdown, and
+  turnover.
+- **News & sentiment page:** 24-hour and 7-day sentiment for every stock in the universe and the
+  latest headlines.
+- **Model health page:** validation metrics, ensemble weights, live scoring of recorded
+  projections, and drift across model runs.
+- A pooled Ridge, Elastic Net, and histogram-gradient-boosting ensemble with market context,
+  relative strength, beta, breadth, volatility, liquidity, and point-in-time sentiment features,
+  plus an optional LightGBM LambdaRank member that joins only when it improves tuning rank IC.
+- Ranking bands scaled by each stock's GARCH excess-return volatility and kept on target by
+  adaptive conformal inference.
+- Finance-specific FinBERT sentiment with a VADER fallback, collected every five minutes into
+  PostgreSQL or local SQLite with leakage-safe point-in-time features.
+- Persistent production monitoring and model-run drift, terminal BAC_LOG logging (`LOG_LEVEL`).
 
 ## Architecture
 
@@ -60,45 +65,31 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 
 ## Repository Structure
 
-- app.py: Main Streamlit entry point and sidebar workflow.
-- app_config.py: Shared constants and runtime configuration.
+- app.py: Entry point: page config, shared sidebar, sentiment collector, and top navigation.
+- app_pages/: One script per page (world_markets, market_ranking, stock, portfolio, news, model_health).
+- ui_state.py: Sidebar selection, persistent watchlist, and the per-session market analysis shared by pages.
+- ui_components.py: Shared Streamlit renderers (tables, evidence banner, charts, monitoring).
+- universe_catalog.py: The ten tracked stock universes with company names.
+- market_sources.py: Universe registry (calendar, currency, description) and ticker lookups.
+- global_markets.py: Cross-asset and universe snapshots, and the background overview loader.
+- model_evidence.py: Out-of-sample evidence verdict that gates ranking signals.
+- portfolio_backtest.py: Non-overlapping top-N strategy backtest with trading costs.
+- app_config.py: Shared modelling constants and exchange-calendar mappings.
 - app_logging.py: BAC_LOG helpers on top of the standard logging module (`LOG_LEVEL`).
-- market_sources.py: Registry of the automatic Ireland, Italy, and U.S. sources (loader, calendar, currency, and copy).
-- ticker_catalog.py: Geographical market presets, ticker examples, suffix rules, and currency labels.
-- market_data.py: Price, screener, news, and sentiment data loading.
-- forecasting.py: Feature engineering, forecasts, and walk-forward backtests.
-- chart_pipeline.py: Streamlit-free Charts pipeline: price loading, ranking, ticker forecasts, and monitoring records.
-- market_model.py: Pooled contextual ensemble, LightGBM ranker, rank IC, probabilities, intervals, and automatic top-10 ranking.
+- market_data.py: Price batches, snapshot recovery, universe leaderboards, and news loading.
+- forecasting.py: Feature engineering, ticker projections, and walk-forward backtests.
+- chart_pipeline.py: Streamlit-free price loading, ranking, ticker projections, and monitoring records.
+- market_model.py: Pooled ensemble, LightGBM ranker, rank IC, probabilities, and bands.
 - volatility.py: Point-in-time GARCH(1,1) horizon volatility with an EWMA fallback.
 - conformal.py: Volatility-scaled adaptive conformal prediction intervals.
 - model_monitoring.py: Persistent forecast outcomes, rolling production metrics, and drift snapshots.
-- sentiment_analysis.py: Cached FinBERT scoring and VADER fallback.
-- sentiment_features.py: Leakage-safe, point-in-time sentiment aggregates.
-- sentiment_service.py: RSS ingestion and the in-process background collector.
-- database.py: PostgreSQL/SQLite DB-API compatibility layer.
-- cache_control.py: `cached_result` decorator (in-process L1, Redis L2), stable cache keys, cache generations, and stampede locks.
-- provider_runtime.py: provider rate limiting, retry/backoff, and circuit breaking.
-- runtime_config.py: environment-backed local and production runtime settings.
-- sentiment_store.py: portable schema, watchlist, news history, and collector status.
-- sentiment_worker.py: Standalone continuous collector for 24/7 operation.
-- analytics_worker.py: Standalone market-ranking and backtest precomputation worker.
-- views.py: Overview, Charts, and News rendering only.
-- tests/test_manual_market_ui.py: Offline Streamlit regression test for the geographical manual-ticker workflow.
-- tests/test_market_leader_rankings.py: Offline ranking and ten-ticker-cap tests for automatic market sources.
-- tests/test_sentiment_pipeline.py: Offline persistence, leakage, feature, and promotion tests.
-- tests/test_market_model.py: Pooled ensemble, probability, interval, and embargo tests.
-- tests/test_forecast_calendar.py: Exchange-session and holiday projection tests.
-- tests/test_model_monitoring.py: Forecast-resolution and drift-monitoring tests.
-- tests/test_prediction_ranking_ui.py: Offline Streamlit proof that the model-ranked top ten charts render automatically.
-- tests/test_chart_pipeline.py: Streamlit-free Charts pipeline tests.
-- tests/test_market_sources.py: Market-source registry consistency tests.
-- tests/test_scalability_runtime.py: Cache-key, cache-decorator, database-pool, and provider-runtime tests.
-- tests/test_app_logging.py: Log-level tests.
-- tests/test_prediction_quality.py: Rank IC, ranker, GARCH, conformal-band, and monitoring-migration tests.
-- requirements.txt: Direct Python dependencies.
-- requirements.lock: Pinned Linux dependency set for Docker and CI.
-- README.md: Project documentation.
-- LICENSE: MIT license.
+- sentiment_analysis.py, sentiment_features.py, sentiment_service.py, sentiment_store.py:
+  FinBERT scoring, point-in-time features, RSS collection, and storage.
+- database.py, cache_control.py, provider_runtime.py, runtime_config.py, market_snapshot_store.py:
+  persistence, caching, provider protection, settings, and last-known-good price snapshots.
+- sentiment_worker.py, analytics_worker.py: Standalone production workers.
+- tests/: Offline unit and end-to-end tests (`python -m unittest discover -s tests`).
+- requirements.txt / requirements.lock: Direct dependencies and the pinned Linux set for Docker and CI.
 
 ## Setup
 
@@ -195,17 +186,19 @@ without synchronous computation.
 
 ## How To Use
 
-1. Choose **Ireland: ISEQ 20 leaders**, **Italy: FTSE MIB leaders**, or **U.S. daily gainers** to rank that source automatically.
-2. Use **View** to select **Overview**, **Charts**, or **News**; select **Charts** to see the price charts and forecast backtests.
-3. The Charts view automatically loads the highest-ranked ten supported tickers for the selected automatic market source.
-4. Select **Manual tickers**, choose a geographical market, and then select example securities or type another Yahoo Finance symbol.
-5. Choose Real-time Mode for intraday tracking. **Live chart updates** then
-   refreshes the Charts view every 60 seconds using free Yahoo polling while
-   the browser tab remains active.
-6. Disable Live chart updates for manual-only operation, or click Refresh now
-   to invalidate prices, rankings, and forecasts immediately.
-7. Monitor terminal logs for BAC_LOG entries. Set `LOG_LEVEL=DEBUG` for
-   per-step model, provider, and per-ticker detail (the default is `INFO`).
+1. **Global markets** opens first: scan indices, rates, currencies, commodities, and every stock
+   universe. Select a stock in the movers tables to open it.
+2. Pick a **Stock universe** in the sidebar (or **My watchlist** and add any Yahoo Finance
+   symbols), a **History window**, and a **Forecast horizon**.
+3. **Market ranking** trains the pooled model on the universe. Read the evidence banner first:
+   without a demonstrated edge the table shows unproven scores and no signals. Select a row to
+   open the stock.
+4. **Stock** shows the projection with its bands, the model's view, sentiment, and headlines.
+5. **Portfolio** shows what holding the model's top picks would have earned after costs.
+6. **News & sentiment** and **Model health** cover sentiment across the universe and model
+   validation, live scoring, and drift.
+7. **Refresh data** in the sidebar reloads prices, rankings, and the global overview. Set
+   `LOG_LEVEL=DEBUG` for detailed terminal logs.
 
 ## Forecasting Approach
 
@@ -239,34 +232,29 @@ comparisons do not guarantee future returns.
 
 ## Data Sources
 
-- Price and volume: Yahoo Finance endpoints through yfinance.
-- Ireland-first leader detection: a tracked ISEQ 20 Euronext Dublin universe, ranked from the latest available Yahoo Finance daily closes.
-- Italy leader detection: 39 current FTSE MIB constituents with Yahoo-supported Milan history, ranked from the latest available daily closes.
-- Optional U.S. leader detection: Yahoo Finance's predefined `day_gainers` screener for eligible U.S. equities.
-- Manual market catalogue: curated examples for major exchanges, with automatic Yahoo Finance suffix handling for custom symbols.
-- News headlines: Google News RSS ticker queries.
+- Prices, indices, rates, currencies, commodities, and crypto: Yahoo Finance through yfinance.
+- Stock universes: fixed lists of large index members, checked against Yahoo Finance price
+  availability on 8 October 2026 (see `universe_catalog.py`). Index membership changes over time.
+- News headlines: Google News RSS queries by company name.
 - Sentiment scoring: FinBERT positive, neutral, and negative probabilities on headline plus summary.
-- Historical sentiment: PostgreSQL in production or local SQLite records, containing publication, first-seen, and scoring timestamps.
+- Historical sentiment: PostgreSQL in production or local SQLite, with publication, first-seen,
+  and scoring timestamps.
 
 ## Reliability Notes
 
 - Intraday endpoints can be slower or intermittently unavailable.
-- Ireland mode ranks a tracked ISEQ 20 Euronext Dublin universe; it is not a complete ranking of every Irish or European listing.
-- Italy mode ranks 39 FTSE MIB constituents. STMicroelectronics is omitted because Yahoo Finance does not currently return its Milan listing.
-- U.S. auto-detection is a filtered Yahoo Finance screen for liquid, large-cap daily gainers; it is not
-  a complete ranking of every listed U.S. stock.
-- Intraday values are the latest returned bar closes; their deltas compare consecutive bars, not
-  live ticks or daily changes.
-- Free live charts poll once per minute; they are not exchange tick streams.
-  Plot zoom and legend choices remain stable across refreshes, while forecast
-  inputs advance only after a five-minute bucket completes to control CPU use.
+- Universes are tracked lists of large index members, not complete or always-current index replicas.
+- The FTSE MIB universe omits STMicroelectronics because Yahoo Finance does not return its Milan listing.
+- Intraday bars on the Stock page can be delayed by Yahoo Finance by 15-20 minutes.
 - Batch price gaps retry through bounded single-ticker requests. Successful
   histories are stored as last-known-good snapshots in PostgreSQL or local
   SQLite and are clearly labelled when used during provider recovery.
-- Severe bar staleness is shown in the Charts data-health strip. Recovery
-  forecasts remain visible but are not recorded as fresh production forecasts.
-- For best responsiveness in real-time mode, track a small number of symbols.
-- On the first Ireland or Italy leaderboard after startup, recent saved prices
+- Severe bar staleness is shown in the Market ranking data-health strip. Stale
+  histories are excluded from the ranking, and recovery projections are not
+  recorded as fresh production forecasts.
+- The Global markets overview needs about 45 Yahoo requests on a cold start; it
+  loads in the background and shows recent saved prices first.
+- On the first universe leaderboard after startup, recent saved prices
   (up to `SNAPSHOT_PREVIEW_MAX_AGE_HOURS`, default 12) are shown immediately
   with a "saved at" note while live prices download; the page updates itself
   when they arrive. Set the value to `0` to always wait for live prices.

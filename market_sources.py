@@ -4,162 +4,204 @@
 # file: market_sources.py
 #############################
 
-"""Registry of the automatic market sources shown in the sidebar.
+"""Registry of the stock universes the app ranks, plus the user's watchlist.
 
-Everything that differs between the Ireland, Italy, and U.S. sources lives in
-one `MarketSource` entry: its performer loader, exchange calendar, currency
-display, and user-facing copy. Adding a market is a single registry entry
-instead of another branch in the app, views, and worker. Manual tickers use
-`ticker_catalog.ManualMarketPreset`, which plays the same role per exchange.
+Each `MarketSource` is a fixed, named universe from `universe_catalog`, with
+its exchange calendar and currency display. Adding a market is one registry
+entry. Keys are stable identifiers used in cache scopes, monitoring records,
+and session state; labels are what the sidebar shows.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
-from app_config import (
-    FTSE_MIB_SOURCE,
-    IRELAND_SOURCE,
-    MARKET_CALENDAR_BY_SUFFIX,
-    MARKET_SOURCES,
-    US_SOURCE,
-)
+import universe_catalog as catalog
+from app_config import MARKET_CALENDAR_BY_SUFFIX
 from app_logging import bac_debug_kv
 
 EURO_SYMBOL = "€"
-MANUAL_CHART_HEADING = "Top momentum stocks - history and feature-based forecast"
+WATCHLIST_KEY = "watchlist"
+WATCHLIST_LABEL = "My watchlist"
+DEFAULT_UNIVERSE = "eurostoxx50"
 
 
 @dataclass(frozen=True)
 class MarketSource:
-    """Describe one automatic market source and its presentation."""
+    """One fixed stock universe and how to display it."""
 
-    # The sidebar option text; also the monitoring and cache-scope identifier.
+    # Stable identifier for cache scopes, monitoring, and session state.
+    key: str
+    # Sidebar label.
     label: str
-    # Name of the `market_data` loader. It is resolved at call time so tests
-    # and alternative providers can replace the module attribute.
-    loader_name: str
-    # `pandas_market_calendars` identifier for session-aware projections.
-    calendar: str
+    # Region heading used to group universes.
+    region: str
+    # Yahoo Finance ticker -> company name.
+    listings: dict[str, str] = field(repr=False)
+    # `pandas_market_calendars` identifier, or None for a multi-exchange
+    # universe whose tickers resolve their own calendar by Yahoo suffix.
+    calendar: str | None
     currency_prefix: str
     price_format: str
     price_axis_label: str
-    sidebar_caption: str
-    overview_caption: str
-    empty_error: str
-    # Labels used when the pooled model ranking is unavailable and the view
-    # falls back to the source's current daily ordering.
-    fallback_leader_label: str
-    fallback_performance_label: str
-    fallback_heading: str
-    chart_heading: str
-    # European listings show a reminder that broker access is not implied.
-    show_broker_access_note: bool = False
+    description: str
+
+    @property
+    def tickers(self) -> list[str]:
+        return list(self.listings)
 
     def load_performers(self) -> pd.DataFrame:
-        """Return this source's current candidate leaderboard."""
+        """Return this universe's latest daily-move leaderboard."""
         import market_data
 
-        return getattr(market_data, self.loader_name)()
+        return market_data.get_universe_leaderboard(self.key)
 
     def price_display(self) -> tuple[str, str, str]:
         """Return the prefix, table format, and chart-axis label."""
         return self.currency_prefix, self.price_format, self.price_axis_label
 
 
-MARKET_SOURCE_REGISTRY: dict[str, MarketSource] = {
-    source.label: source
-    for source in (
-        MarketSource(
-            label=IRELAND_SOURCE,
-            loader_name="get_iseq20_top_performers",
-            calendar="XDUB",
-            currency_prefix=EURO_SYMBOL,
-            price_format=f"{EURO_SYMBOL}%.2f",
-            price_axis_label="Price (EUR)",
-            sidebar_caption=(
-                "Ranks the tracked ISEQ 20 Euronext Dublin listings by their "
-                "latest available daily close."
-            ),
-            overview_caption=(
-                "The leaderboard ranks the latest available daily close from the "
-                "tracked ISEQ 20 Euronext Dublin universe."
-            ),
-            empty_error="No ISEQ 20 price data was returned. Try refreshing in a moment.",
-            fallback_leader_label="Top ISEQ 20 daily mover",
-            fallback_performance_label="Best ISEQ 20 daily change",
-            fallback_heading="ISEQ 20 top daily performers",
-            chart_heading="ISEQ 20 candidates - history and feature-based forecast",
-            show_broker_access_note=True,
-        ),
-        MarketSource(
-            label=FTSE_MIB_SOURCE,
-            loader_name="get_ftse_mib_top_performers",
-            calendar="XMIL",
-            currency_prefix=EURO_SYMBOL,
-            price_format=f"{EURO_SYMBOL}%.2f",
-            price_axis_label="Price (EUR)",
-            sidebar_caption=(
-                "Ranks the Yahoo-supported FTSE MIB constituents by their latest "
-                "available daily close and charts the top 10."
-            ),
-            overview_caption=(
-                "The leaderboard ranks the latest available daily close across "
-                "Yahoo-supported FTSE MIB constituents."
-            ),
-            empty_error="No FTSE MIB constituent data was returned. Try refreshing in a moment.",
-            fallback_leader_label="Top FTSE MIB daily mover",
-            fallback_performance_label="Best FTSE MIB daily change",
-            fallback_heading="FTSE MIB top 10 daily performers",
-            chart_heading="FTSE MIB candidates - history and feature-based forecast",
-            show_broker_access_note=True,
-        ),
-        MarketSource(
-            label=US_SOURCE,
-            loader_name="get_us_top_performers",
-            calendar="NYSE",
-            currency_prefix="$",
-            price_format="$%.2f",
-            price_axis_label="Price (USD)",
-            sidebar_caption=(
-                "Uses Yahoo Finance's U.S. large-cap daily-gainers screen and "
-                "charts the top 10 equities."
-            ),
-            overview_caption=(
-                "The leaderboard uses Yahoo Finance's predefined U.S. equity "
-                "filter for liquid daily gainers."
-            ),
-            empty_error=(
-                "No top performers were returned by the market screener. "
-                "Try refreshing in a moment."
-            ),
-            fallback_leader_label="Top detected daily gainer",
-            fallback_performance_label="Best detected daily change",
-            fallback_heading="Detected top 10 daily gainers",
-            chart_heading="Detected U.S. candidates - history and feature-based forecast",
-        ),
+def _euro(key: str, label: str, region: str, listings: dict[str, str], calendar: str | None,
+          description: str) -> MarketSource:
+    return MarketSource(
+        key=key,
+        label=label,
+        region=region,
+        listings=listings,
+        calendar=calendar,
+        currency_prefix=EURO_SYMBOL,
+        price_format=f"{EURO_SYMBOL}%.2f",
+        price_axis_label="Price (EUR)",
+        description=description,
     )
-}
-
-# The registry and the sidebar option list must never drift apart.
-assert tuple(MARKET_SOURCE_REGISTRY) == MARKET_SOURCES
 
 
-def get_market_source(ticker_source: str | None) -> MarketSource | None:
-    """Return the automatic source for a sidebar value, or None for manual mode."""
-    return MARKET_SOURCE_REGISTRY.get(str(ticker_source))
+_UNIVERSES = (
+    MarketSource(
+        key="dow30",
+        label="United States - Dow Jones 30",
+        region="Americas",
+        listings=catalog.DOW_30_LISTINGS,
+        calendar="NYSE",
+        currency_prefix="$",
+        price_format="$%.2f",
+        price_axis_label="Price (USD)",
+        description="The 30 Dow Jones Industrial Average members.",
+    ),
+    MarketSource(
+        key="nasdaq_leaders",
+        label="United States - Nasdaq-100 leaders",
+        region="Americas",
+        listings=catalog.NASDAQ_LEADERS_LISTINGS,
+        calendar="NYSE",
+        currency_prefix="$",
+        price_format="$%.2f",
+        price_axis_label="Price (USD)",
+        description="Forty of the largest Nasdaq-100 members.",
+    ),
+    _euro(
+        "eurostoxx50",
+        "Euro area - Euro Stoxx 50",
+        "Europe",
+        catalog.EURO_STOXX_50_LISTINGS,
+        None,
+        "The 50 Euro Stoxx 50 blue chips across euro-area exchanges.",
+    ),
+    MarketSource(
+        key="ftse100_leaders",
+        label="United Kingdom - FTSE 100 leaders",
+        region="Europe",
+        listings=catalog.FTSE_100_LEADERS_LISTINGS,
+        calendar="LSE",
+        currency_prefix="",
+        price_format="%.1f GBp",
+        price_axis_label="Price (GBp)",
+        description="Forty of the largest FTSE 100 members, quoted in pence.",
+    ),
+    _euro("dax40", "Germany - DAX 40", "Europe", catalog.DAX_40_LISTINGS, "XETR",
+          "The 40 DAX members on Xetra."),
+    _euro("cac40", "France - CAC 40", "Europe", catalog.CAC_40_LISTINGS, "XPAR",
+          "The 40 CAC 40 members on Euronext Paris."),
+    _euro("ftsemib", "Italy - FTSE MIB", "Europe", catalog.FTSE_MIB_MILAN_LISTINGS, "XMIL",
+          "The Yahoo-supported FTSE MIB members on Borsa Italiana."),
+    _euro("iseq20", "Ireland - ISEQ 20", "Europe", catalog.ISEQ_20_DUBLIN_LISTINGS, "XDUB",
+          "The tracked ISEQ 20 members on Euronext Dublin."),
+    MarketSource(
+        key="nikkei_leaders",
+        label="Japan - Nikkei 225 leaders",
+        region="Asia-Pacific",
+        listings=catalog.NIKKEI_LEADERS_LISTINGS,
+        calendar="JPX",
+        currency_prefix="¥",
+        price_format="¥%.0f",
+        price_axis_label="Price (JPY)",
+        description="Thirty of the largest Nikkei 225 members on the Tokyo exchange.",
+    ),
+    MarketSource(
+        key="hangseng_leaders",
+        label="Hong Kong - Hang Seng leaders",
+        region="Asia-Pacific",
+        listings=catalog.HANG_SENG_LEADERS_LISTINGS,
+        calendar="HKEX",
+        currency_prefix="HK$",
+        price_format="HK$%.2f",
+        price_axis_label="Price (HKD)",
+        description="Thirty of the largest Hang Seng members.",
+    ),
+)
+
+MARKET_SOURCE_REGISTRY: dict[str, MarketSource] = {source.key: source for source in _UNIVERSES}
+# Ordered keys of every rankable universe (the watchlist is not one of them).
+MARKET_SOURCES: tuple[str, ...] = tuple(MARKET_SOURCE_REGISTRY)
+assert DEFAULT_UNIVERSE in MARKET_SOURCE_REGISTRY
 
 
-def resolve_market_calendar(ticker_source: str | None, ticker: str = "") -> str:
-    """Return the best exchange-calendar identifier for the active context.
+def get_market_source(universe_key: str | None) -> MarketSource | None:
+    """Return a registered universe, or None for the watchlist."""
+    return MARKET_SOURCE_REGISTRY.get(str(universe_key))
 
-    Automatic sources use their registered exchange. Manual symbols do not
-    carry a source, so their Yahoo suffix selects the most likely exchange.
+
+def universe_label(universe_key: str) -> str:
+    """Return the sidebar label for a universe key or the watchlist."""
+    if universe_key == WATCHLIST_KEY:
+        return WATCHLIST_LABEL
+    source = get_market_source(universe_key)
+    return source.label if source is not None else str(universe_key)
+
+
+def company_name(ticker: str) -> str:
+    """Return a known company name for a ticker in any universe."""
+    for source in _UNIVERSES:
+        if ticker in source.listings:
+            return source.listings[ticker]
+    return ticker
+
+
+def source_for_ticker(ticker: str) -> MarketSource | None:
+    """Return the first registered universe that lists a ticker."""
+    return next((source for source in _UNIVERSES if ticker in source.listings), None)
+
+
+def all_listed_tickers() -> dict[str, str]:
+    """Return every catalogued ticker with its company name, de-duplicated."""
+    listed: dict[str, str] = {}
+    for source in _UNIVERSES:
+        for ticker, name in source.listings.items():
+            listed.setdefault(ticker, name)
+    return listed
+
+
+def resolve_market_calendar(universe_key: str | None, ticker: str = "") -> str:
+    """Return the best exchange-calendar identifier for a ticker.
+
+    Single-exchange universes use their registered calendar. Multi-exchange
+    universes and the watchlist resolve each ticker by its Yahoo suffix,
+    defaulting to NYSE for unsuffixed (U.S.) symbols.
     """
-    source = get_market_source(ticker_source)
-    if source is not None:
+    source = get_market_source(universe_key)
+    if source is not None and source.calendar is not None:
         calendar_name = source.calendar
     else:
         ticker_upper = str(ticker).upper()
@@ -174,7 +216,7 @@ def resolve_market_calendar(ticker_source: str | None, ticker: str = "") -> str:
 
     bac_debug_kv(
         "market_sources.resolve_market_calendar",
-        ticker_source=ticker_source,
+        universe=universe_key,
         ticker=ticker,
         calendar_name=calendar_name,
     )

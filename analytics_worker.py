@@ -20,7 +20,7 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from app_config import MARKET_SOURCES, MAX_CHARTED_PERFORMERS
+from app_config import MAX_CHARTED_PERFORMERS
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
 from cache_control import (
     dequeue_analytics_jobs,
@@ -30,7 +30,7 @@ from cache_control import (
 from forecasting import backtest_forecast_model, forecast_feature_model
 from market_data import classify_price_histories, get_price_history_batch
 from market_model import rank_market_candidates
-from market_sources import MARKET_SOURCE_REGISTRY, resolve_market_calendar
+from market_sources import MARKET_SOURCE_REGISTRY, MARKET_SOURCES, resolve_market_calendar
 from model_monitoring import record_market_model_run
 from runtime_config import (
     ANALYTICS_HORIZONS,
@@ -52,8 +52,8 @@ def precompute_market(source: str, period: str, horizon: int) -> dict[str, int]:
         horizon=horizon,
         status="started",
     )
-    performers = MARKET_SOURCE_REGISTRY[source].load_performers()
-    tickers = performers.get("Ticker", pd.Series(dtype=str)).astype(str).tolist()
+    # The same ticker order the web app requests, so both share cache entries.
+    tickers = MARKET_SOURCE_REGISTRY[source].tickers
     price_data = get_price_history_batch(tickers, period=period, interval="1d")
     # Rank exactly the candidate pool the web tier ranks (fresh histories only)
     # so both processes address the same shared-cache entry.
@@ -71,8 +71,9 @@ def precompute_market(source: str, period: str, horizon: int) -> dict[str, int]:
     )
     ranking = result.get("ranking", pd.DataFrame())
     diagnostics = result.get("diagnostics", {})
+    # The ranking covers every stock; warm projections for the best-ranked ones.
     top_tickers = (
-        ranking["Ticker"].astype(str).tolist()
+        ranking["Ticker"].astype(str).tolist()[:MAX_CHARTED_PERFORMERS]
         if not ranking.empty
         else list(valid_price_data)[:MAX_CHARTED_PERFORMERS]
     )

@@ -4,23 +4,21 @@
 # file: chart_pipeline.py
 #############################
 
-"""Data and model pipeline behind the Charts view, free of Streamlit.
+"""Data and model pipeline behind the ranking and stock pages, free of Streamlit.
 
-`views.render_charts_view` used to load prices, rank the market, fit and
-compare models, choose the active forecast, and write monitoring records
-inline with its Plotly and table rendering. Those steps now live here and
-return small dataclasses, so they can be tested without a Streamlit runtime
-and the view module only decides how results are displayed.
+Loading prices, ranking the market, fitting and comparing models, choosing
+the active forecast, and writing monitoring records live here and return
+small dataclasses, so they can be tested without a Streamlit runtime and the
+pages only decide how results are displayed.
 
-Pipeline order, as used by the view:
+Pipeline order, as used by the pages:
 
 1. `load_chart_prices` - fetch histories, falling back to daily bars when an
    intraday request returns nothing.
 2. `market_data.classify_price_histories` - split fresh and stale histories.
 3. `resolve_matured_forecasts` - close earlier forecasts whose target arrived.
-4. `rank_live_candidates` - pooled market ranking (automatic daily sources).
-5. `select_charted_tickers` - which tickers get charts, plus headline metrics.
-6. `build_ticker_forecast` / `record_displayed_forecast` - one ticker's
+4. `rank_live_candidates` - pooled market ranking of a stock universe.
+5. `build_ticker_forecast` / `record_displayed_forecast` - one ticker's
    forecast curve, its uncertainty bands, and its monitoring record.
 """
 
@@ -45,11 +43,9 @@ from forecasting import (
 from market_data import (
     PriceDataHealth,
     get_price_history_batch,
-    growth_score,
-    momentum_label,
 )
 from market_model import rank_market_candidates
-from market_sources import MarketSource, resolve_market_calendar
+from market_sources import resolve_market_calendar
 from model_monitoring import (
     record_forecast,
     record_market_model_run,
@@ -214,6 +210,8 @@ class MarketRankingResult:
     ranking: pd.DataFrame = field(default_factory=pd.DataFrame)
     diagnostics: dict[str, object] = field(default_factory=dict)
     sentiment_by_ticker: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # Per-date predictions and outcomes on the untouched evaluation period.
+    evaluation: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def rank_live_candidates(
@@ -252,75 +250,10 @@ def rank_live_candidates(
             ranking_as_of,
             diagnostics,
         )
-    return MarketRankingResult(ranking, diagnostics, sentiment_by_ticker)
-
-
-@dataclass(frozen=True)
-class ChartSelection:
-    """Tickers to chart, in display order, and the headline metric strip."""
-
-    tickers: list[str]
-    leader_label: str
-    performance_label: str
-    performance_value: str
-
-
-def select_charted_tickers(
-    *,
-    market_source: MarketSource | None,
-    ranking: pd.DataFrame,
-    candidate_tickers: list[str],
-    valid_tickers: list[str],
-    detected_performers: pd.DataFrame,
-    price_data: Mapping[str, pd.DataFrame],
-    realtime_mode: bool,
-    interval: str,
-) -> ChartSelection:
-    """Choose charted tickers from the model ranking, daily moves, or momentum."""
-    if market_source is not None and not ranking.empty:
-        selection = ChartSelection(
-            tickers=ranking["Ticker"].tolist(),
-            leader_label="Top predicted ticker",
-            performance_label="Expected excess return",
-            performance_value=f"{float(ranking['Expected excess return'].iloc[0]):+.2f}%",
-        )
-    elif market_source is not None:
-        # A transparent fallback preserves chart access when the candidate
-        # history is too short for the embargoed pooled validation.
-        tickers = [
-            ticker for ticker in candidate_tickers if ticker in valid_tickers
-        ][:MAX_CHARTED_PERFORMERS]
-        daily_change_by_ticker = (
-            detected_performers.set_index("Ticker")["Daily change"].to_dict()
-        )
-        leader_change = daily_change_by_ticker.get(tickers[0], np.nan)
-        selection = ChartSelection(
-            tickers=tickers,
-            leader_label=market_source.fallback_leader_label,
-            performance_label=market_source.fallback_performance_label,
-            performance_value=(
-                f"{leader_change:.2f}%" if pd.notna(leader_change) else "Unavailable"
-            ),
-        )
-    else:
-        scores = {ticker: growth_score(price_data[ticker]) for ticker in valid_tickers}
-        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        current_momentum_label = momentum_label(realtime_mode, interval)
-        selection = ChartSelection(
-            tickers=[ticker for ticker, _ in ranked[:MAX_CHARTED_PERFORMERS]],
-            leader_label=f"Top {current_momentum_label} mover",
-            performance_label=f"Best {current_momentum_label} growth",
-            performance_value=f"{ranked[0][1]:.2f}%",
-        )
-
-    bac_log_kv(
-        "chart_pipeline.selection",
-        leader_label=selection.leader_label,
-        performance_value=selection.performance_value,
-        ranking_available=not ranking.empty,
-    )
-    bac_log_list_preview("chart_pipeline.selection", "charted_tickers", selection.tickers)
-    return selection
+    evaluation = result.get("evaluation")
+    if not isinstance(evaluation, pd.DataFrame):
+        evaluation = pd.DataFrame()
+    return MarketRankingResult(ranking, diagnostics, sentiment_by_ticker, evaluation)
 
 
 @dataclass(frozen=True)

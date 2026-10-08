@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pandas as pd
 
 import market_data
-from app_config import FTSE_MIB_MILAN_LISTINGS
+from universe_catalog import FTSE_MIB_MILAN_LISTINGS
 
 
 def _two_session_history(daily_change: float) -> pd.DataFrame:

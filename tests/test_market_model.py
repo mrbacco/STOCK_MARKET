@@ -68,8 +68,11 @@ class MarketModelTest(unittest.TestCase):
         )
 
         ranking = result["ranking"]
+        assert isinstance(ranking, pd.DataFrame)
         diagnostics = result["diagnostics"]
-        self.assertEqual(4, len(ranking))
+        # Every candidate is ranked; top_n only scopes the selection backtest.
+        self.assertEqual(6, len(ranking))
+        self.assertEqual(list(range(1, 7)), ranking["Rank"].tolist())
         self.assertTrue(
             {
                 "Expected excess return",

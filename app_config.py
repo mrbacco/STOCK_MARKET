@@ -16,21 +16,7 @@ from typing import Any
 
 from app_logging import bac_debug_kv
 
-US_SCREENER_QUERY = "day_gainers"
-# Automatic markets now keep a wider candidate pool for the cross-sectional
-# model.  The UI still charts exactly the best ten *predicted* candidates.
-AUTO_DETECTED_PERFORMERS = 40
 MAX_CHARTED_PERFORMERS = 10
-
-IRELAND_SOURCE = "Ireland: ISEQ 20 leaders"
-FTSE_MIB_SOURCE = "Italy: FTSE MIB leaders"
-US_SOURCE = "U.S. daily gainers"
-MANUAL_SOURCE = "Manual tickers"
-MARKET_SOURCES = (IRELAND_SOURCE, FTSE_MIB_SOURCE, US_SOURCE)
-
-VIEW_OPTIONS = ("Overview", "Charts", "News")
-DEFAULT_TICKER_SOURCE = IRELAND_SOURCE
-DEFAULT_VIEW = "Overview"
 
 MOMENTUM_PERIODS = 30
 BACKTEST_TRAINING_POINTS = 120
@@ -75,6 +61,8 @@ MARKET_CALENDAR_BY_SUFFIX = {
     ".T": "JPX",
     ".HK": "HKEX",
     ".SW": "SIX",
+    ".BR": "XBRU",
+    ".HE": "XHEL",
 }
 
 # These times are only a resilience fallback when the optional calendar package
@@ -93,6 +81,8 @@ FALLBACK_MARKET_SESSION_HOURS = {
     "JPX": ("09:00", "15:30"),
     "HKEX": ("09:30", "16:00"),
     "SIX": ("09:00", "17:30"),
+    "XBRU": ("09:00", "17:30"),
+    "XHEL": ("10:00", "18:30"),
 }
 
 # The feature list is centralized here so both the training and inference paths
@@ -161,117 +151,6 @@ PANEL_MIN_BASE_TRAINING_DATES = 60
 PANEL_TUNING_DATES = 30
 PANEL_EVALUATION_DATES = 30
 PANEL_RANDOM_STATE = 42
-
-
-# The Ireland mode is intentionally explicit and finite, rather than using a
-# dynamic screener, because the app wants a stable, named market universe.
-ISEQ_20_DUBLIN_LISTINGS = {
-    "A5G.IR": "AIB Group",
-    "BIRG.IR": "Bank of Ireland Group",
-    "C5H.IR": "Cairn Homes",
-    "DQ7A.IR": "Donegal Investment Group",
-    "EG7.IR": "FBD Holdings",
-    "GL9.IR": "Glanbia",
-    "GVR.IR": "Glenveagh Properties",
-    "GRP.IR": "Greencoat Renewables",
-    "HMSO.IR": "Hammerson",
-    "IR5B.IR": "Irish Continental Group",
-    "IRES.IR": "Irish Residential Properties REIT",
-    "KMR.IR": "Kenmare Resources",
-    "KRZ.IR": "Kerry Group",
-    "KRX.IR": "Kingspan Group",
-    "MLC.IR": "Malin",
-    "MIO.IR": "Mincon Group",
-    "OIZ.IR": "Origin Enterprises",
-    "PTSB.IR": "Permanent TSB",
-    "RYA.IR": "Ryanair Holdings",
-    "UPR.IR": "Uniphar",
-}
-
-# The current FTSE MIB contains 40 companies. Yahoo Finance exposes Milan
-# history for 39 of them; STMicroelectronics' Milan symbol (STMMI) is omitted
-# because Yahoo does not currently return that local listing. This universe was
-# checked against Borsa Italiana's constituent list on 17 July 2026.
-FTSE_MIB_MILAN_LISTINGS = {
-    "A2A.MI": "A2A",
-    "AMP.MI": "Amplifon",
-    "AVIO.MI": "Avio",
-    "AZM.MI": "Azimut Holding",
-    "BMED.MI": "Banca Mediolanum",
-    "BMPS.MI": "Banca Monte dei Paschi di Siena",
-    "BAMI.MI": "Banco BPM",
-    "BPE.MI": "BPER Banca",
-    "BC.MI": "Brunello Cucinelli",
-    "BZU.MI": "Buzzi",
-    "CPR.MI": "Campari",
-    "DIA.MI": "DiaSorin",
-    "ENEL.MI": "Enel",
-    "ENI.MI": "Eni",
-    "RACE.MI": "Ferrari",
-    "FCT.MI": "Fincantieri",
-    "FBK.MI": "FinecoBank",
-    "G.MI": "Generali",
-    "HER.MI": "Hera",
-    "ISP.MI": "Intesa Sanpaolo",
-    "INW.MI": "Inwit",
-    "IG.MI": "Italgas",
-    "IVG.MI": "Iveco Group",
-    "LDO.MI": "Leonardo",
-    "LTMC.MI": "Lottomatica Group",
-    "MB.MI": "Mediobanca",
-    "MONC.MI": "Moncler",
-    "NEXI.MI": "Nexi",
-    "PST.MI": "Poste Italiane",
-    "PRY.MI": "Prysmian",
-    "REC.MI": "Recordati",
-    "SPM.MI": "Saipem",
-    "SRG.MI": "Snam",
-    "STLAM.MI": "Stellantis",
-    "TIT.MI": "Telecom Italia",
-    "TEN.MI": "Tenaris",
-    "TRN.MI": "Terna",
-    "UCG.MI": "UniCredit",
-    "UNI.MI": "Unipol",
-}
-
-
-def initialize_session_defaults(session_state: Any) -> None:
-    """Seed Streamlit session state with stable defaults on each rerun.
-
-    Streamlit exposes a session-state proxy rather than a plain mutable mapping,
-    so this helper intentionally accepts `Any` and uses only the small surface
-    area that the app needs: `.get(...)` and item assignment.
-    """
-    if session_state is None or not hasattr(session_state, "get"):
-        bac_debug_kv(
-            "app_config.initialize_session_defaults",
-            session_state_available=False,
-        )
-        return
-
-    try:
-        ticker_source_before = session_state.get("ticker_source")
-        active_view_before = session_state.get("active_view")
-        if session_state.get("ticker_source") not in {*MARKET_SOURCES, MANUAL_SOURCE}:
-            session_state["ticker_source"] = DEFAULT_TICKER_SOURCE
-        if session_state.get("active_view") not in VIEW_OPTIONS:
-            session_state["active_view"] = DEFAULT_VIEW
-        bac_debug_kv(
-            "app_config.initialize_session_defaults",
-            ticker_source_before=ticker_source_before,
-            ticker_source_after=session_state.get("ticker_source"),
-            active_view_before=active_view_before,
-            active_view_after=session_state.get("active_view"),
-        )
-    except Exception:
-        # In bare Python execution or other non-Streamlit contexts, session
-        # state may not behave like the normal runtime proxy. Silently skip so
-        # the app can still be imported or statically checked.
-        bac_debug_kv(
-            "app_config.initialize_session_defaults",
-            message="Session defaults could not be applied outside Streamlit runtime.",
-        )
-        return
 
 
 def selected_horizon_label(realtime_mode: bool, interval: str, forecast_points: int) -> str:
