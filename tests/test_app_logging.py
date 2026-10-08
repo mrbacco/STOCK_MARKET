@@ -18,7 +18,9 @@ import app_logging
 class AppLoggingTest(unittest.TestCase):
     def setUp(self) -> None:
         self.stream = io.StringIO()
-        self.handler = app_logging._LOGGER.handlers[0]
+        handler = app_logging._LOGGER.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        self.handler = handler
         self.original_stream = self.handler.setStream(self.stream)
         self.original_level = app_logging._LOGGER.level
         app_logging._LOGGER.setLevel(logging.INFO)

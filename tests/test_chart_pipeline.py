@@ -95,6 +95,7 @@ class ChartPipelineTest(unittest.TestCase):
         self.assertEqual(3, len(forecast.future_dates))
         self.assertTrue({"lower_80", "upper_80"}.issubset(forecast.forecast.columns))
         summary = forecast.backtest_summary()
+        assert summary is not None
         self.assertIn("Projected return", summary)
         self.assertEqual("AAA", summary["Ticker"])
 
@@ -110,6 +111,7 @@ class ChartPipelineTest(unittest.TestCase):
         )
 
         self.assertEqual("unavailable", forecast.status)
+        assert forecast.diagnosis is not None
         self.assertIn("message", forecast.diagnosis)
         self.assertIsNone(forecast.backtest_summary())
 

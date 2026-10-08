@@ -30,7 +30,7 @@ from cache_control import (
 from forecasting import backtest_forecast_model, forecast_feature_model
 from market_data import classify_price_histories, get_price_history_batch
 from market_model import rank_market_candidates
-from market_sources import get_market_source, resolve_market_calendar
+from market_sources import MARKET_SOURCE_REGISTRY, resolve_market_calendar
 from model_monitoring import record_market_model_run
 from runtime_config import (
     ANALYTICS_HORIZONS,
@@ -52,7 +52,7 @@ def precompute_market(source: str, period: str, horizon: int) -> dict[str, int]:
         horizon=horizon,
         status="started",
     )
-    performers = get_market_source(source).load_performers()
+    performers = MARKET_SOURCE_REGISTRY[source].load_performers()
     tickers = performers.get("Ticker", pd.Series(dtype=str)).astype(str).tolist()
     price_data = get_price_history_batch(tickers, period=period, interval="1d")
     # Rank exactly the candidate pool the web tier ranks (fresh histories only)

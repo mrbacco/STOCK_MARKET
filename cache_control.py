@@ -36,7 +36,7 @@ from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import Any, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import pandas as pd
 
@@ -383,6 +383,14 @@ class _LocalResultCache:
             self._entries.clear()
 
 
+class CachedFunction(Generic[T]):
+    """Type of a `cached_result` function: callable, with `cache_clear()`."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> T: ...
+
+    def cache_clear(self) -> None: ...
+
+
 def cached_result(
     namespace: str,
     *,
@@ -392,7 +400,7 @@ def cached_result(
     shared: bool = True,
     allow_compute: bool = True,
     on_failure: Callable[[], Any] | None = None,
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
+) -> Callable[[Callable[..., T]], CachedFunction[T]]:
     """Cache a function in-process (L1) and, optionally, in Redis (L2).
 
     - ``generation`` ("market" or "model") adds the current scope's generation
@@ -405,7 +413,7 @@ def cached_result(
       Without ``on_failure``, every exception propagates to the caller.
     """
 
-    def decorate(function: Callable[..., T]) -> Callable[..., T]:
+    def decorate(function: Callable[..., T]) -> CachedFunction[T]:
         signature = inspect.signature(function)
         local_cache = _LocalResultCache(max_entries, ttl_seconds)
 
@@ -464,6 +472,6 @@ def cached_result(
             return value
 
         wrapper.cache_clear = local_cache.clear  # type: ignore[attr-defined]
-        return wrapper
+        return cast(CachedFunction[T], wrapper)
 
     return decorate

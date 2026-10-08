@@ -242,8 +242,11 @@ def rank_live_candidates(
         sentiment_by_ticker=sentiment_by_ticker,
         top_n=MAX_CHARTED_PERFORMERS,
     )
-    ranking = result.get("ranking", pd.DataFrame())
-    diagnostics = result.get("diagnostics", {})
+    ranking = result.get("ranking")
+    if not isinstance(ranking, pd.DataFrame):
+        ranking = pd.DataFrame()
+    raw_diagnostics = result.get("diagnostics")
+    diagnostics = dict(raw_diagnostics) if isinstance(raw_diagnostics, Mapping) else {}
     if diagnostics:
         ranking_as_of = max(
             pd.Timestamp(price_data[ticker]["Date"].max())

@@ -37,7 +37,9 @@ class MarketSourceRegistryTest(unittest.TestCase):
         """Replacing the market_data attribute must change what the source loads."""
         leaderboard = pd.DataFrame([{"Ticker": "ENEL.MI", "Company": "Enel"}])
         with patch.object(market_data, "get_ftse_mib_top_performers", return_value=leaderboard):
-            loaded = get_market_source(FTSE_MIB_SOURCE).load_performers()
+            source = get_market_source(FTSE_MIB_SOURCE)
+            assert source is not None
+            loaded = source.load_performers()
         self.assertEqual(["ENEL.MI"], loaded["Ticker"].tolist())
 
     def test_calendar_uses_source_then_manual_suffix(self) -> None:

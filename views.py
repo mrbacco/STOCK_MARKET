@@ -15,7 +15,7 @@ this module only decides how their results are displayed.
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 import numpy as np
 import pandas as pd
@@ -62,9 +62,9 @@ from runtime_config import ANALYTICS_READ_ONLY, LIVE_CHART_REFRESH_SECONDS
 def _leaderboard_column_config(
     performers: pd.DataFrame,
     price_format: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Column formats shared by every daily-move leaderboard table."""
-    columns: dict[str, object] = {
+    columns: dict[str, Any] = {
         "Daily change": st.column_config.NumberColumn("Daily change", format="%.2f%%"),
         "Last price": st.column_config.NumberColumn("Last price", format=price_format),
     }
@@ -557,13 +557,15 @@ def _render_market_ranking(
 
 def _render_forecast_status_warning(forecast: TickerForecast) -> None:
     """Tell the user exactly why a curve is missing or shorter than requested."""
+    if forecast.diagnosis is None:
+        return
+    message = forecast.diagnosis.get("message", "")
     if forecast.status == "unavailable":
-        st.warning(f"{forecast.ticker}: forecast unavailable. {forecast.diagnosis['message']}")
+        st.warning(f"{forecast.ticker}: forecast unavailable. {message}")
     elif forecast.status == "partial":
         st.warning(
             f"{forecast.ticker}: showing {len(forecast.forecast)} of "
-            f"{forecast.requested_points} requested forecast points. "
-            f"{forecast.diagnosis['message']}"
+            f"{forecast.requested_points} requested forecast points. {message}"
         )
 
 

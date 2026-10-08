@@ -177,7 +177,9 @@ with st.sidebar:
             ]
         )
     else:
-        st.caption(get_market_source(ticker_source or DEFAULT_TICKER_SOURCE).sidebar_caption)
+        sidebar_source = get_market_source(ticker_source or DEFAULT_TICKER_SOURCE)
+        if sidebar_source is not None:
+            st.caption(sidebar_source.sidebar_caption)
 
     realtime_mode = st.toggle("Real-time Mode", value=False)
     bac_debug_kv("app.sidebar", realtime_mode=realtime_mode)
