@@ -45,6 +45,7 @@ from forecasting import (
 from market_model import rank_market_candidates
 from market_data import (
     classify_price_histories,
+    company_names_by_ticker,
     get_price_history_batch,
     growth_score,
     load_news_frames_parallel,
@@ -144,6 +145,58 @@ def prepare_realtime_forecast_history(
     return completed_history
 
 
+def _leaderboard_column_config(
+    performers: pd.DataFrame,
+    price_format: str,
+) -> dict[str, object]:
+    """Column formats shared by every daily-move leaderboard table."""
+    columns: dict[str, object] = {
+        "Daily change": st.column_config.NumberColumn("Daily change", format="%.2f%%"),
+        "Last price": st.column_config.NumberColumn("Last price", format=price_format),
+    }
+    if "Last session" in performers.columns:
+        columns["Last session"] = st.column_config.DateColumn("Last session")
+    return columns
+
+
+def _render_latest_bar_quotes(
+    price_data: dict[str, pd.DataFrame],
+    tickers: List[str],
+    interval: str,
+    price_prefix: str,
+) -> None:
+    """Show up to three latest-bar closes with their change versus the prior bar."""
+    shown_tickers = tickers[:3]
+    if not shown_tickers:
+        return
+    quote_cols = st.columns(len(shown_tickers))
+    for index, ticker in enumerate(shown_tickers):
+        price_series = price_data[ticker]["Close"].dropna()
+        if len(price_series) < 2:
+            bac_debug_kv(
+                "views.quote",
+                ticker=ticker,
+                message="Skipped metric because fewer than two close values were available.",
+                close_points=len(price_series),
+            )
+            continue
+        current_price = float(price_series.iloc[-1])
+        previous_price = float(price_series.iloc[-2])
+        delta_value = current_price - previous_price
+        bac_debug_kv(
+            "views.quote",
+            ticker=ticker,
+            current_price=current_price,
+            previous_price=previous_price,
+            delta_value=delta_value,
+        )
+        quote_cols[index].metric(
+            f"{ticker} latest {interval} close",
+            f"{price_prefix}{current_price:.2f}",
+            f"{price_prefix}{delta_value:+.2f} vs. prior bar",
+        )
+
+
 def render_overview_view(
     ticker_source: str | None,
     tickers: List[str],
@@ -187,19 +240,16 @@ def render_overview_view(
                 "The leaderboard uses Yahoo Finance's predefined U.S. equity filter for liquid daily gainers."
             )
 
-        leaderboard_columns = {
-            "Daily change": st.column_config.NumberColumn("Daily change", format="%.2f%%"),
-            "Last price": st.column_config.NumberColumn("Last price", format=price_format),
-        }
-        if "Last session" in detected_performers.columns:
-            leaderboard_columns["Last session"] = st.column_config.DateColumn("Last session")
-
         bac_log_kv(
             "views.render_overview_view",
             detected_rows=len(detected_performers),
             detected_columns=list(detected_performers.columns),
         )
-        st.dataframe(detected_performers, column_config=leaderboard_columns, hide_index=True)
+        st.dataframe(
+            detected_performers,
+            column_config=_leaderboard_column_config(detected_performers, price_format),
+            hide_index=True,
+        )
         return
 
     # Manual mode uses only the first few tickers so the overview stays compact.
@@ -237,32 +287,7 @@ def render_overview_view(
 
     if realtime_mode:
         bac_log_section("views.render_overview_view", "Rendering intraday quote metrics.")
-        quote_cols = st.columns(min(3, len(valid_tickers)))
-        for index, ticker in enumerate(valid_tickers[:3]):
-            price_series = price_data[ticker]["Close"].dropna()
-            if len(price_series) >= 2:
-                current_price = float(price_series.iloc[-1])
-                previous_price = float(price_series.iloc[-2])
-                delta_value = current_price - previous_price
-                bac_debug_kv(
-                    "views.render_overview_view.quote",
-                    ticker=ticker,
-                    current_price=current_price,
-                    previous_price=previous_price,
-                    delta_value=delta_value,
-                )
-                quote_cols[index].metric(
-                    f"{ticker} latest {interval} close",
-                    f"{price_prefix}{current_price:.2f}",
-                    f"{price_prefix}{delta_value:+.2f} vs. prior bar",
-                )
-            else:
-                bac_debug_kv(
-                    "views.render_overview_view.quote",
-                    ticker=ticker,
-                    message="Skipped metric because fewer than two close values were available.",
-                    close_points=len(price_series),
-                )
+        _render_latest_bar_quotes(price_data, valid_tickers, interval, price_prefix)
 
     summary_frame = pd.DataFrame(
         [
@@ -618,53 +643,16 @@ def render_charts_view(
         # Keep source selection visible without confusing it with the predictive
         # ranking.  Users can inspect the underlying movers in a collapsed area.
         with st.expander("Current daily-move candidate pool"):
-            leaderboard_columns = {
-                "Daily change": st.column_config.NumberColumn(
-                    "Daily change", format="%.2f%%"
-                ),
-                "Last price": st.column_config.NumberColumn(
-                    "Last price", format=price_format
-                ),
-            }
-            if "Last session" in detected_performers.columns:
-                leaderboard_columns["Last session"] = st.column_config.DateColumn(
-                    "Last session"
-                )
             st.dataframe(
                 detected_performers,
-                column_config=leaderboard_columns,
+                column_config=_leaderboard_column_config(detected_performers, price_format),
                 hide_index=True,
                 width="stretch",
             )
 
     if realtime_mode:
         bac_log_section("views.render_charts_view", "Rendering realtime quote metrics.")
-        quote_cols = st.columns(min(3, len(top_performers)))
-        for index, ticker in enumerate(top_performers[:3]):
-            price_series = price_data[ticker]["Close"].dropna()
-            if len(price_series) >= 2:
-                current_price = float(price_series.iloc[-1])
-                previous_price = float(price_series.iloc[-2])
-                delta_value = current_price - previous_price
-                bac_debug_kv(
-                    "views.render_charts_view.quote",
-                    ticker=ticker,
-                    current_price=current_price,
-                    previous_price=previous_price,
-                    delta_value=delta_value,
-                )
-                quote_cols[index].metric(
-                    f"{ticker} latest {interval} close",
-                    f"{price_prefix}{current_price:.2f}",
-                    f"{price_prefix}{delta_value:+.2f} vs. prior bar",
-                )
-            else:
-                bac_debug_kv(
-                    "views.render_charts_view.quote",
-                    ticker=ticker,
-                    message="Skipped realtime metric because fewer than two close values were available.",
-                    close_points=len(price_series),
-                )
+        _render_latest_bar_quotes(price_data, top_performers, interval, price_prefix)
         st.caption(
             "Intraday figures use the latest returned bar close. The delta is versus the prior bar, not a live tick or daily change."
         )
@@ -1267,14 +1255,7 @@ def render_news_view(
     st.subheader("Investing news and sentiment")
 
     news_tickers = tickers[:MAX_CHARTED_PERFORMERS]
-    company_by_ticker = (
-        {
-            str(ticker): str(company)
-            for ticker, company in detected_performers.set_index("Ticker")["Company"].to_dict().items()
-        }
-        if not detected_performers.empty
-        else {}
-    )
+    company_by_ticker = company_names_by_ticker(detected_performers, news_tickers)
     bac_log_list_preview("views.render_news_view", "news_tickers", news_tickers)
 
     with st.spinner("Fetching news and sentiment..."):

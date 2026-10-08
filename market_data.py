@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import tempfile
-from typing import List, Mapping
+from typing import Iterable, List, Mapping
 
 import numpy as np
 import pandas as pd
@@ -810,6 +810,26 @@ def get_news(ticker: str, company_name: str = "", max_items: int = 20) -> pd.Dat
     result = result.rename(columns={"published_at": "published"})
     bac_debug_kv("market_data.get_news", ticker=ticker, result_rows=len(result))
     return result
+
+
+def company_names_by_ticker(
+    performers: pd.DataFrame,
+    tickers: Iterable[str] = (),
+) -> dict[str, str]:
+    """Map tickers to company names; unknown tickers fall back to themselves.
+
+    Company names improve Google News queries, and the fallback keeps custom
+    manual symbols searchable by their ticker.
+    """
+    names: dict[str, str] = {}
+    if not performers.empty and {"Ticker", "Company"}.issubset(performers.columns):
+        names = {
+            str(ticker): str(company)
+            for ticker, company in zip(performers["Ticker"], performers["Company"])
+        }
+    for ticker in tickers:
+        names.setdefault(str(ticker), str(ticker))
+    return names
 
 
 def growth_score(df: pd.DataFrame, periods: int = MOMENTUM_PERIODS) -> float:

@@ -45,6 +45,13 @@ except ImportError:  # pragma: no cover - exercised only in degraded installs.
     market_calendars = None
 
 
+def model_feature_columns(include_sentiment: bool) -> tuple[str, ...]:
+    """Return the ordered inputs of the price-only or price + sentiment model."""
+    if include_sentiment:
+        return (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
+    return PRICE_FEATURE_COLUMNS
+
+
 def prepare_model_history(price_history: pd.DataFrame) -> pd.DataFrame:
     """Clean and standardize history before feature engineering begins."""
     bac_debug_kv(
@@ -110,11 +117,7 @@ def build_feature_frame(
     market_calendar: str = "NYSE",
 ) -> pd.DataFrame:
     """Create the ordered technical and optional point-in-time sentiment matrix."""
-    feature_columns = (
-        (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
-        if include_sentiment
-        else PRICE_FEATURE_COLUMNS
-    )
+    feature_columns = model_feature_columns(include_sentiment)
     bac_debug_kv(
         "forecast.build_feature_frame",
         history_rows=len(history),
@@ -197,41 +200,31 @@ def build_forecast_training_frame(
         )
         return pd.DataFrame()
 
-    feature_columns = (
-        (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
-        if include_sentiment
-        else PRICE_FEATURE_COLUMNS
-    )
     feature_frame = build_feature_frame(
         history,
         sentiment_history=sentiment_history,
         include_sentiment=include_sentiment,
         market_calendar=market_calendar,
     )
-    target_log_return = np.log(history["Close"].shift(-forecast_horizon) / history["Close"])
-    training_frame = pd.concat([history[["Date", "Close"]], feature_frame], axis=1)
-    training_frame["target_log_return"] = target_log_return
-
-    # Rows with incomplete rolling windows or missing future targets cannot be used.
-    training_frame = training_frame.replace([np.inf, -np.inf], np.nan).dropna(
-        subset=[*feature_columns, "target_log_return"]
+    training_frame = _training_frame_from_precomputed_features(
+        history,
+        feature_frame,
+        forecast_horizon,
+        model_feature_columns(include_sentiment),
+        include_sentiment,
     )
-    if len(training_frame) > MODEL_LOOKBACK_POINTS:
-        training_frame = training_frame.iloc[-MODEL_LOOKBACK_POINTS:]
-
-    if include_sentiment and not has_sufficient_sentiment_history(training_frame):
-        bac_debug_kv(
+    if include_sentiment and training_frame.empty:
+        bac_debug_section(
             "forecast.build_forecast_training_frame",
-            message="Sentiment model is still collecting a historical baseline.",
-            observed_sentiment_bars=int((training_frame["news_count_24h"] > 0).sum()),
+            "Sentiment model is still collecting a historical baseline.",
         )
-        return pd.DataFrame()
+        return training_frame
 
     bac_debug_kv(
         "forecast.build_forecast_training_frame",
         training_rows=len(training_frame),
     )
-    return training_frame.reset_index(drop=True)
+    return training_frame
 
 
 def fit_forecast_model(
@@ -270,7 +263,10 @@ def _training_frame_from_precomputed_features(
     end_index: int | None = None,
     start_index: int | None = None,
 ) -> pd.DataFrame:
-    """Build one horizon target without recalculating backward-looking features.
+    """Build one horizon training table from an existing feature matrix.
+
+    Rows with incomplete rolling windows or missing future targets are dropped
+    and only the latest `MODEL_LOOKBACK_POINTS` rows are kept.
 
     `end_index` is a forecast origin.  Training rows are explicitly capped at
     `origin - horizon`, ensuring every target was already realized at that
@@ -338,11 +334,7 @@ def diagnose_forecast_readiness(
             bac_log_kv("forecast.diagnose_readiness", **diagnosis)
             return diagnosis
 
-        feature_columns = (
-            (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
-            if include_sentiment
-            else PRICE_FEATURE_COLUMNS
-        )
+        feature_columns = model_feature_columns(include_sentiment)
         feature_frame = build_feature_frame(
             history,
             sentiment_history=sentiment_history,
@@ -447,11 +439,7 @@ def forecast_feature_model(
     history = prepare_model_history(price_history)
     if history.empty:
         return pd.DataFrame()
-    feature_columns = (
-        (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
-        if include_sentiment
-        else PRICE_FEATURE_COLUMNS
-    )
+    feature_columns = model_feature_columns(include_sentiment)
     feature_frame = build_feature_frame(
         history,
         sentiment_history=sentiment_history,
@@ -563,11 +551,7 @@ def backtest_forecast_model(
         return pd.DataFrame()
 
     test_start_training_end = len(history) - forecast_horizon - test_points
-    feature_columns = (
-        (*PRICE_FEATURE_COLUMNS, *SENTIMENT_FEATURE_COLUMNS)
-        if include_sentiment
-        else PRICE_FEATURE_COLUMNS
-    )
+    feature_columns = model_feature_columns(include_sentiment)
     feature_frame = build_feature_frame(
         history,
         sentiment_history=sentiment_history,

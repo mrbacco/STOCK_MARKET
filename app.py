@@ -41,6 +41,7 @@ from app_logging import (
 )
 from cache_control import invalidate_market_scope, set_cache_scope
 from market_data import (
+    company_names_by_ticker,
     get_ftse_mib_top_performers,
     get_iseq20_top_performers,
     get_us_top_performers,
@@ -353,16 +354,9 @@ if not tickers:
 
 # Persist the current universe before the shared worker starts. The collector
 # continues polling this bounded watchlist independently of Streamlit reruns.
-company_by_ticker = (
-    {
-        str(ticker): str(company)
-        for ticker, company in detected_performers.set_index("Ticker")["Company"].to_dict().items()
-    }
-    if not detected_performers.empty and "Company" in detected_performers.columns
-    else {ticker: ticker for ticker in tickers}
-)
+company_by_ticker = company_names_by_ticker(detected_performers, tickers)
 watchlist_changed = update_watchlist(
-    {ticker: company_by_ticker.get(ticker, ticker) for ticker in tickers}
+    {ticker: company_by_ticker[ticker] for ticker in tickers}
 )
 # Every widget interaction reruns this script. Waking the collector only for
 # newly tracked tickers prevents each click from starting a full RSS + FinBERT
