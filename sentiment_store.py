@@ -16,7 +16,7 @@ import pandas as pd
 
 from app_config import SENTIMENT_MAX_WATCHLIST
 from app_logging import bac_log_kv
-from database import database_connection
+from database import database_connection, ensure_schema
 
 DEFAULT_SENTIMENT_DB = Path(__file__).resolve().parent / "data" / "sentiment.db"
 
@@ -90,6 +90,16 @@ def initialize_sentiment_store(db_path: str | Path | None = None) -> Path:
     return path
 
 
+def _ensure_store(db_path: str | Path | None = None) -> None:
+    """Create the schema on first use per process and database target."""
+    ensure_schema(
+        "sentiment",
+        DEFAULT_SENTIMENT_DB,
+        db_path,
+        lambda: initialize_sentiment_store(db_path),
+    )
+
+
 def update_watchlist(
     company_by_ticker: Mapping[str, str],
     db_path: str | Path | None = None,
@@ -100,7 +110,7 @@ def update_watchlist(
     Returns True when at least one ticker was not already active, so callers
     can wake the collector only when there is genuinely new work.
     """
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     updated_at = _utc_iso()
     clean_items = [
         (str(ticker).upper().strip(), str(company).strip(), updated_at)
@@ -160,7 +170,7 @@ def update_watchlist(
 
 def load_active_watchlist(db_path: str | Path | None = None) -> dict[str, str]:
     """Return active tickers ordered from most recently refreshed."""
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     with _connect(db_path) as connection:
         rows = connection.execute(
             """
@@ -182,7 +192,7 @@ def existing_content_hashes(
     hashes = [str(value) for value in content_hashes]
     if not hashes:
         return set()
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     placeholders = ",".join("?" for _ in hashes)
     with _connect(db_path) as connection:
         rows = connection.execute(
@@ -226,7 +236,7 @@ def save_news_sentiment(
     if not prepared_rows:
         return 0
 
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     with _connect(db_path) as connection:
         connection.executemany(
             """
@@ -259,7 +269,7 @@ def load_sentiment_history(
     limit: int | None = None,
 ) -> pd.DataFrame:
     """Load persisted point-in-time sentiment for features or display."""
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     limit_clause = "LIMIT ?" if limit is not None else ""
     parameters: list[Any] = [ticker]
     if limit is not None:
@@ -293,7 +303,7 @@ def set_collector_state(
     db_path: str | Path | None = None,
 ) -> None:
     """Persist lightweight collector health information for the UI."""
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     with _connect(db_path) as connection:
         connection.execute(
             """
@@ -309,7 +319,7 @@ def set_collector_state(
 
 def get_collector_status(db_path: str | Path | None = None) -> dict[str, Any]:
     """Return collection health plus persisted article and watchlist counts."""
-    initialize_sentiment_store(db_path)
+    _ensure_store(db_path)
     with _connect(db_path) as connection:
         state_rows = connection.execute(
             "SELECT state_key, state_value, updated_at FROM sentiment_collector_state"

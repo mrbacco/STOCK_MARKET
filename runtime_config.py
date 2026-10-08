@@ -27,6 +27,8 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# Upper bound of pooled PostgreSQL connections per process (web replica or worker).
+DATABASE_POOL_SIZE = max(int(os.getenv("DATABASE_POOL_SIZE", "5")), 1)
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CACHE_NAMESPACE = os.getenv("CACHE_NAMESPACE", "stock-market").strip() or "stock-market"
 

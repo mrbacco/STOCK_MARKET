@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from app_logging import bac_debug_kv, bac_log_kv
-from database import database_connection
+from database import database_connection, ensure_schema
 
 
 DEFAULT_MONITORING_DB = Path(__file__).resolve().parent / "data" / "model_monitoring.db"
@@ -111,6 +111,16 @@ def initialize_monitoring_store(db_path: str | Path | None = None) -> Path:
     return path
 
 
+def _ensure_store(db_path: str | Path | None = None) -> None:
+    """Create the schema on first use per process and database target."""
+    ensure_schema(
+        "monitoring",
+        DEFAULT_MONITORING_DB,
+        db_path,
+        lambda: initialize_monitoring_store(db_path),
+    )
+
+
 def record_forecast(
     *,
     market_source: str,
@@ -129,7 +139,7 @@ def record_forecast(
     db_path: str | Path | None = None,
 ) -> None:
     """Persist the first displayed forecast for an origin without rewriting it."""
-    initialize_monitoring_store(db_path)
+    _ensure_store(db_path)
     values = (
         str(market_source),
         str(ticker).upper(),
@@ -191,7 +201,7 @@ def resolve_pending_forecasts(
     db_path: str | Path | None = None,
 ) -> int:
     """Resolve all pending forecasts whose target bar is now present."""
-    initialize_monitoring_store(db_path)
+    _ensure_store(db_path)
     if not price_data:
         return 0
     tickers = [str(ticker).upper() for ticker in price_data]
@@ -274,7 +284,7 @@ def record_market_model_run(
     """Persist one pooled-model validation snapshot for drift inspection."""
     if not diagnostics:
         return
-    initialize_monitoring_store(db_path)
+    _ensure_store(db_path)
     values = (
         str(market_source),
         int(horizon),
@@ -335,7 +345,7 @@ def load_forecast_quality(
     db_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Aggregate resolved production forecasts by model, horizon, and regime."""
-    initialize_monitoring_store(db_path)
+    _ensure_store(db_path)
     horizon_filter = "AND horizon = ?" if horizon is not None else ""
     parameters: list[Any] = [str(market_source)]
     if horizon is not None:
@@ -393,7 +403,7 @@ def load_market_model_history(
     db_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load recent pooled validation snapshots used to identify drift."""
-    initialize_monitoring_store(db_path)
+    _ensure_store(db_path)
     with _connect(db_path) as connection:
         rows = connection.execute(
             """

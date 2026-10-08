@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import cache_control
+import database
 import forecasting
 import market_data
 import pandas as pd
@@ -234,6 +236,56 @@ class ScalabilityRuntimeTest(unittest.TestCase):
         self.assertEqual(["FRESH"], health.live_tickers)
         self.assertEqual(["RECOVERED", "FROZEN"], health.stale_tickers)
         self.assertEqual("provider_stale", frozen.attrs["bac_data_status"])
+
+
+    def test_schema_runs_once_per_target_and_again_if_the_file_vanishes(self):
+        """Store calls must not re-run DDL, but a deleted SQLite file is rebuilt."""
+        calls = []
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "schema.db"
+
+            def initialize():
+                calls.append(path)
+                path.touch()
+
+            for _ in range(3):
+                database.ensure_schema("test-store", path, path, initialize)
+            self.assertEqual(1, len(calls))
+
+            path.unlink()
+            database.ensure_schema("test-store", path, path, initialize)
+            self.assertEqual(2, len(calls))
+
+    def test_postgres_connections_are_borrowed_from_the_pool(self):
+        """Each unit of work reuses a pooled connection and never closes it."""
+        events = []
+
+        class FakeConnection:
+            def execute(self, statement, parameters):
+                events.append(("execute", statement, parameters))
+
+            def close(self):
+                events.append(("close",))
+
+        class FakePool:
+            @contextmanager
+            def connection(self):
+                events.append(("checkout",))
+                yield FakeConnection()
+                events.append(("return",))
+
+        with (
+            patch.object(database, "DATABASE_URL", "postgresql://example/db"),
+            patch.object(database, "_postgres_pool", return_value=FakePool()),
+        ):
+            with database.database_connection("unused.db") as connection:
+                self.assertEqual("postgresql", connection.backend)
+                connection.execute("SELECT ?", [1])
+
+        self.assertEqual(
+            [("checkout",), ("execute", "SELECT %s", (1,)), ("return",)],
+            events,
+        )
 
 
 if __name__ == "__main__":

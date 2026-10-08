@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 from app_logging import bac_debug_kv
-from database import database_connection
+from database import database_connection, ensure_schema
 
 
 DEFAULT_MARKET_SNAPSHOT_DB = (
@@ -86,6 +86,16 @@ def initialize_market_snapshot_store(
     return path
 
 
+def _ensure_store(db_path: str | Path | None = None) -> None:
+    """Create the schema on first use per process and database target."""
+    ensure_schema(
+        "market_snapshots",
+        DEFAULT_MARKET_SNAPSHOT_DB,
+        db_path,
+        lambda: initialize_market_snapshot_store(db_path),
+    )
+
+
 def save_price_history_snapshot(
     ticker: str,
     period: str,
@@ -139,7 +149,7 @@ def save_price_history_snapshot(
         for row in frame.itertuples(index=False)
     ]
 
-    initialize_market_snapshot_store(db_path)
+    _ensure_store(db_path)
     with _connect(db_path) as connection:
         # Delete and insert occur in one database transaction. Readers therefore
         # see either the earlier complete snapshot or the new complete snapshot.
@@ -182,7 +192,7 @@ def load_price_history_snapshot(
     db_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load a stale-but-usable snapshot and attach transparent provenance."""
-    initialize_market_snapshot_store(db_path)
+    _ensure_store(db_path)
     normalized_ticker = str(ticker).upper()
     with _connect(db_path) as connection:
         rows = connection.execute(
