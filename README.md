@@ -34,6 +34,9 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - A pooled Ridge, Elastic Net, and histogram-gradient-boosting ensemble with market context, relative strength, beta, breadth, volatility, and liquidity features.
 - Horizon-embargoed tuning/evaluation periods, paired sentiment promotion, calibrated outperformance probability, model agreement, and abstention signals.
 - Forecast 50% and 80% uncertainty intervals plus exchange-aware future sessions and intraday bars.
+- Rank IC (daily rank correlation between predicted and realized order) on the untouched evaluation period.
+- An optional LightGBM LambdaRank ensemble member that joins only when it improves the tuning period's rank IC.
+- Market-ranking bands scaled by each stock's GARCH excess-return volatility and kept on target by adaptive conformal inference.
 - Persistent production monitoring for rolling MAE, return MAE, directional accuracy, interval coverage, volatility regime, and model-run drift.
 - Top grower ranking using recent performance.
 - Interactive charts for close price and feature-based forecasts.
@@ -65,7 +68,9 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - market_data.py: Price, screener, news, and sentiment data loading.
 - forecasting.py: Feature engineering, forecasts, and walk-forward backtests.
 - chart_pipeline.py: Streamlit-free Charts pipeline: price loading, ranking, ticker forecasts, and monitoring records.
-- market_model.py: Pooled contextual ensemble, probabilities, intervals, and automatic top-10 ranking.
+- market_model.py: Pooled contextual ensemble, LightGBM ranker, rank IC, probabilities, intervals, and automatic top-10 ranking.
+- volatility.py: Point-in-time GARCH(1,1) horizon volatility with an EWMA fallback.
+- conformal.py: Volatility-scaled adaptive conformal prediction intervals.
 - model_monitoring.py: Persistent forecast outcomes, rolling production metrics, and drift snapshots.
 - sentiment_analysis.py: Cached FinBERT scoring and VADER fallback.
 - sentiment_features.py: Leakage-safe, point-in-time sentiment aggregates.
@@ -89,6 +94,7 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - tests/test_market_sources.py: Market-source registry consistency tests.
 - tests/test_scalability_runtime.py: Cache-key, cache-decorator, database-pool, and provider-runtime tests.
 - tests/test_app_logging.py: Log-level tests.
+- tests/test_prediction_quality.py: Rank IC, ranker, GARCH, conformal-band, and monitoring-migration tests.
 - requirements.txt: Direct Python dependencies.
 - requirements.lock: Pinned Linux dependency set for Docker and CI.
 - README.md: Project documentation.
@@ -213,6 +219,15 @@ horizons of one to five exchange sessions.
 - It is directional, not predictive in a guaranteed sense.
 - It works best as a short-horizon market context tool.
 - It should not be used as a sole decision engine for investing.
+
+The ranking is judged mainly by rank IC: for each evaluation date, the rank correlation between
+the predicted and the realized order of stocks, averaged over dates. Values persistently above 0
+mean the ranking beats chance. A LightGBM LambdaRank model, trained directly on each day's
+ordering, is added to the ensemble only if it raises the tuning period's rank IC above zero and
+above the ensemble without it. The ranking's 50% and 80% bands are `prediction +/- q * sigma^gamma`,
+where `sigma` is a GARCH(1,1) forecast of the stock's excess-return volatility (estimated only on
+the earliest period), `gamma` is learned from tuning errors, and `q` comes from adaptive conformal
+inference that learns only from outcomes already realized at each evaluation date.
 
 The dashboard reports walk-forward tests at the selected horizon. Ensemble weights are learned on
 an earlier tuning window and measured on a later untouched evaluation window, with a full

@@ -104,11 +104,33 @@ def initialize_monitoring_store(db_path: str | Path | None = None) -> Path:
                 sentiment_observed_rows INTEGER,
                 model_weights_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
+                rank_ic REAL,
                 PRIMARY KEY (market_source, horizon, as_of)
             );
             """
         )
+        _add_missing_columns(connection, "market_model_runs", {"rank_ic": "REAL"})
     return path
+
+
+def _add_missing_columns(connection: Any, table: str, columns: Mapping[str, str]) -> None:
+    """Add columns introduced after a table was first created.
+
+    `CREATE TABLE IF NOT EXISTS` leaves existing tables untouched, so stores
+    created by an earlier release gain new columns here.
+    """
+    if connection.backend == "postgresql":
+        for name, column_type in columns.items():
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {column_type}"
+            )
+        return
+    existing = {
+        str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, column_type in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {column_type}")
 
 
 def _ensure_store(db_path: str | Path | None = None) -> None:
@@ -301,6 +323,7 @@ def record_market_model_run(
         int(diagnostics.get("Sentiment-observed rows", 0)),
         json.dumps(diagnostics.get("Model weights", {}), sort_keys=True),
         _utc_iso(),
+        float(diagnostics.get("Rank IC", np.nan)),
     )
     with _connect(db_path) as connection:
         connection.execute(
@@ -311,8 +334,8 @@ def record_market_model_run(
                 directional_accuracy, probability_brier,
                 interval_coverage_80, selection_mean_excess,
                 selection_hit_rate, sentiment_observed_rows,
-                model_weights_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                model_weights_json, created_at, rank_ic
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_source, horizon, as_of) DO UPDATE SET
                 candidate_tickers = excluded.candidate_tickers,
                 evaluation_dates = excluded.evaluation_dates,
@@ -325,7 +348,8 @@ def record_market_model_run(
                 selection_hit_rate = excluded.selection_hit_rate,
                 sentiment_observed_rows = excluded.sentiment_observed_rows,
                 model_weights_json = excluded.model_weights_json,
-                created_at = excluded.created_at
+                created_at = excluded.created_at,
+                rank_ic = excluded.rank_ic
             """,
             values,
         )
@@ -411,7 +435,7 @@ def load_market_model_history(
                    baseline_mae, directional_accuracy, probability_brier,
                    interval_coverage_80, selection_mean_excess,
                    selection_hit_rate, sentiment_observed_rows,
-                   model_weights_json
+                   rank_ic, model_weights_json
             FROM market_model_runs
             WHERE market_source = ? AND horizon = ?
             ORDER BY as_of DESC
@@ -423,6 +447,10 @@ def load_market_model_history(
         return pd.DataFrame()
     frame = pd.DataFrame([dict(row) for row in rows])
     frame["as_of"] = pd.to_datetime(frame["as_of"], errors="coerce")
+    # Runs stored before a metric existed hold NULL; keep such columns numeric
+    # so medians and drift treat them as missing rather than dropping them.
+    for column in frame.columns.difference(["as_of", "model_weights_json"]):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame.sort_values("as_of").reset_index(drop=True)
 
 
@@ -442,6 +470,9 @@ def latest_drift_summary(model_history: pd.DataFrame) -> dict[str, float]:
         ),
         "Coverage drift": float(
             latest["interval_coverage_80"] - reference["interval_coverage_80"]
+        ),
+        "Rank IC drift": float(
+            latest.get("rank_ic", np.nan) - reference.get("rank_ic", np.nan)
         ),
     }
     bac_log_kv("monitoring.latest_drift_summary", **drift)

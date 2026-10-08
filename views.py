@@ -444,6 +444,12 @@ def _render_ranking_pending_notice(
         )
 
 
+def _diagnostic_value(diagnostics: dict[str, object], key: str) -> float:
+    """Return a numeric diagnostic, or NaN when it is missing or not numeric."""
+    value = diagnostics.get(key)
+    return float(value) if isinstance(value, (int, float)) else float("nan")
+
+
 def _render_market_ranking(
     market_source: MarketSource,
     ranking: MarketRankingResult,
@@ -501,7 +507,13 @@ def _render_market_ranking(
                 "Lower 80": st.column_config.NumberColumn("80% lower", format="%+.2f%%"),
                 "Upper 80": st.column_config.NumberColumn("80% upper", format="%+.2f%%"),
                 "Predicted volatility": st.column_config.NumberColumn(
-                    "Predicted volatility", format="%.2f%%"
+                    "Excess volatility",
+                    format="%.2f%%",
+                    help=(
+                        "GARCH forecast of how much this stock's return relative to "
+                        "the market may vary over the horizon. It also scales the "
+                        "uncertainty bands."
+                    ),
                 ),
                 "Model disagreement": st.column_config.NumberColumn(
                     "Model disagreement", format="%.2f%%"
@@ -517,26 +529,36 @@ def _render_market_ranking(
         # A compact metric strip surfaces the untouched evaluation period,
         # including a direct backtest of selecting the ten best each date.
         diagnostics = ranking.diagnostics
-        diagnostic_columns = st.columns(5)
+        diagnostic_columns = st.columns(6)
         diagnostic_columns[0].metric(
+            "Rank IC",
+            f"{_diagnostic_value(diagnostics, 'Rank IC'):+.3f}",
+            help=(
+                "Average daily correlation between the predicted and the realized "
+                "order of stocks on the untouched evaluation period. Above 0 means "
+                "the ranking beats chance; 0.03-0.05 is already useful for stocks."
+            ),
+        )
+        diagnostic_columns[5].metric(
             "Evaluation direction",
-            f"{float(diagnostics.get('Directional accuracy', np.nan)):.1f}%",
+            f"{_diagnostic_value(diagnostics, 'Directional accuracy'):.1f}%",
         )
         diagnostic_columns[1].metric(
             "80% band coverage",
-            f"{float(diagnostics.get('80% interval coverage', np.nan)):.1f}%",
+            f"{_diagnostic_value(diagnostics, '80% interval coverage'):.1f}%",
+            help="Share of evaluation outcomes inside their adaptive, volatility-scaled 80% band.",
         )
         diagnostic_columns[2].metric(
             "Excess-return MAE",
-            f"{float(diagnostics.get('Evaluation MAE', np.nan)):.2f}%",
+            f"{_diagnostic_value(diagnostics, 'Evaluation MAE'):.2f}%",
         )
         diagnostic_columns[3].metric(
             "Top-10 realized excess",
-            f"{float(diagnostics.get('Top-10 realized mean excess', np.nan)):+.2f}%",
+            f"{_diagnostic_value(diagnostics, 'Top-10 realized mean excess'):+.2f}%",
         )
         diagnostic_columns[4].metric(
             "Top-10 realized hit rate",
-            f"{float(diagnostics.get('Top-10 realized hit rate', np.nan)):.1f}%",
+            f"{_diagnostic_value(diagnostics, 'Top-10 realized hit rate'):.1f}%",
         )
         with st.expander("Model validation and weighting details"):
             st.json(diagnostics)
@@ -866,7 +888,7 @@ def _render_model_monitoring(
         return
     drift = latest_drift_summary(model_history)
     if drift:
-        drift_columns = st.columns(4)
+        drift_columns = st.columns(5)
         drift_columns[0].metric(
             "MAE drift",
             f"{drift['MAE drift']:+.2f} pp",
@@ -885,6 +907,11 @@ def _render_model_monitoring(
             "Coverage drift",
             f"{drift['Coverage drift']:+.1f} pp",
         )
+        rank_ic_drift = float(drift.get("Rank IC drift", np.nan))
+        drift_columns[4].metric(
+            "Rank IC drift",
+            f"{rank_ic_drift:+.3f}" if np.isfinite(rank_ic_drift) else "n/a",
+        )
     with st.expander("Stored market-model run history"):
         model_history_display = model_history.rename(
             columns={
@@ -899,6 +926,7 @@ def _render_model_monitoring(
                 "selection_mean_excess": "Top-10 mean excess",
                 "selection_hit_rate": "Top-10 hit rate",
                 "sentiment_observed_rows": "Sentiment rows",
+                "rank_ic": "Rank IC",
             }
         )
         st.dataframe(

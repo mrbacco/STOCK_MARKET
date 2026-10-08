@@ -13,6 +13,10 @@ plotly>=5.24.1
 feedparser>=6.0.11
 vaderSentiment>=3.3.2
 scikit-learn>=1.6.0
+# LambdaRank member of the pooled ensemble (optional at runtime).
+lightgbm>=4.5.0
+# GARCH volatility forecasts that scale the uncertainty bands.
+arch>=7.2.0
 requests>=2.32.3
 beautifulsoup4>=4.12.3
 transformers>=4.53.0,<6

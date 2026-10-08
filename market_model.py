@@ -19,9 +19,11 @@ weights.  Forecast-horizon gaps prevent labels from crossing a split boundary.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from typing import cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
@@ -48,8 +50,10 @@ from app_logging import (
 )
 from cache_control import cached_result
 from runtime_config import ANALYTICS_READ_ONLY
+from conformal import adaptive_conformal_bands
 from forecasting import build_feature_frame, prepare_model_history
 from market_sources import resolve_market_calendar
+from volatility import horizon_volatility
 
 
 ModelFactory = Callable[[], Pipeline]
@@ -300,9 +304,207 @@ def split_panel_dates(
     return split
 
 
+RANKER_MODEL = "LightGBM ranker"
+# Within each date, targets are graded 0..4 by their cross-sectional quintile.
+RANKER_RELEVANCE_GRADES = 5
+# Share of the latest training dates held out to calibrate the ranker's scale.
+RANKER_CALIBRATION_SHARE = 0.3
+
+
+def mean_rank_ic(
+    dates: ArrayLike,
+    predicted: ArrayLike,
+    realized: ArrayLike,
+) -> tuple[float, float]:
+    """Return the mean daily Spearman rank IC and its t-statistic.
+
+    Rank IC measures, for each date, how well the predicted ordering of stocks
+    matches the ordering of their realized returns (+1 perfect, 0 none).
+    """
+    data = pd.DataFrame(
+        {
+            "Date": np.asarray(dates),
+            "predicted": np.asarray(predicted, dtype=float),
+            "realized": np.asarray(realized, dtype=float),
+        }
+    ).dropna(subset=["predicted", "realized"])
+    daily_ic_values: list[float] = []
+    for _date, group in data.groupby("Date"):
+        if len(group) < 3:
+            continue
+        ranks = group[["predicted", "realized"]].rank().to_numpy(dtype=float)
+        if np.std(ranks[:, 0]) == 0 or np.std(ranks[:, 1]) == 0:
+            continue
+        daily_ic_values.append(float(np.corrcoef(ranks[:, 0], ranks[:, 1])[0, 1]))
+    daily_ic = np.asarray(daily_ic_values, dtype=float)
+    if daily_ic.size == 0:
+        return float("nan"), float("nan")
+    mean_ic = float(np.mean(daily_ic))
+    spread = float(np.std(daily_ic, ddof=1)) if daily_ic.size > 1 else float("nan")
+    t_stat = (
+        mean_ic / spread * float(np.sqrt(len(daily_ic)))
+        if spread and np.isfinite(spread) and spread > 0
+        else float("nan")
+    )
+    return mean_ic, t_stat
+
+
+def _cross_sectional_zscore(values: ArrayLike, dates: ArrayLike) -> np.ndarray:
+    """Standardize scores within each date; single-row dates score zero."""
+    series = pd.Series(np.asarray(values, dtype=float))
+    by_date = series.groupby(np.asarray(dates))
+    spread = by_date.transform("std").replace(0.0, np.nan)
+    return ((series - by_date.transform("mean")) / spread).fillna(0.0).to_numpy()
+
+
+def _relevance_grades(frame: pd.DataFrame) -> np.ndarray:
+    """Grade each row 0..4 by its target's quintile within its date."""
+    percentile = frame.groupby("Date")["target_excess_log_return"].rank(
+        pct=True, method="first"
+    )
+    grades = np.floor(percentile.to_numpy() * RANKER_RELEVANCE_GRADES).astype(int)
+    return np.minimum(grades, RANKER_RELEVANCE_GRADES - 1)
+
+
+def _new_ranker():
+    from lightgbm import LGBMRanker
+
+    return LGBMRanker(
+        objective="lambdarank",
+        n_estimators=200,
+        learning_rate=0.05,
+        num_leaves=15,
+        min_child_samples=20,
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.8,
+        reg_lambda=1.0,
+        random_state=PANEL_RANDOM_STATE,
+        deterministic=True,
+        force_row_wise=True,
+        verbose=-1,
+    )
+
+
+def _fit_ranker(frame: pd.DataFrame):
+    """Fit a LambdaRank model with one query group per date."""
+    ordered = frame.sort_values(["Date", "Ticker"])
+    ranker = _new_ranker()
+    ranker.fit(
+        ordered.loc[:, PANEL_FEATURE_COLUMNS],
+        _relevance_grades(ordered),
+        group=ordered.groupby("Date", sort=True).size().to_numpy(),
+    )
+    return ranker
+
+
+def _fit_predict_ranker(
+    training_frame: pd.DataFrame,
+    prediction_frame: pd.DataFrame,
+    forecast_horizon: int,
+) -> np.ndarray | None:
+    """Predict excess returns from a LambdaRank model trained on daily order.
+
+    A ranker outputs scores, not returns. Its per-date z-scores are converted
+    to the return scale with a slope fitted on the latest training dates, which
+    a separate earlier-dates ranker never saw (with a horizon-length gap), so
+    the scale is not inflated by in-sample fit. Returns None when LightGBM is
+    unavailable or the held-out scores carry no positive information.
+    """
+    try:
+        import lightgbm  # noqa: F401
+    except ImportError:
+        return None
+
+    dates = np.sort(np.asarray(training_frame["Date"].unique()))
+    holdout_count = int(len(dates) * RANKER_CALIBRATION_SHARE)
+    fit_end = len(dates) - holdout_count - int(forecast_horizon)
+    if holdout_count < 5 or fit_end < 20:
+        return None
+    early = pd.DataFrame(
+        training_frame.loc[training_frame["Date"].isin(dates[:fit_end].tolist())]
+    )
+    holdout = pd.DataFrame(
+        training_frame.loc[training_frame["Date"].isin(dates[-holdout_count:].tolist())]
+    )
+
+    holdout_z = _cross_sectional_zscore(
+        np.asarray(_fit_ranker(early).predict(holdout.loc[:, PANEL_FEATURE_COLUMNS])),
+        holdout["Date"],
+    )
+    realized = np.asarray(holdout["target_excess_log_return"], dtype=float)
+    denominator = float(np.dot(holdout_z, holdout_z))
+    slope = float(np.dot(holdout_z, realized) / denominator) if denominator > 0 else 0.0
+    if slope <= 0:
+        bac_debug_kv("market_model.ranker", status="no_holdout_signal", slope=slope)
+        return None
+
+    final_ranker = _fit_ranker(training_frame)
+    prediction_z = _cross_sectional_zscore(
+        np.asarray(final_ranker.predict(prediction_frame.loc[:, PANEL_FEATURE_COLUMNS])),
+        prediction_frame["Date"],
+    )
+    bac_debug_kv("market_model.ranker", status="fitted", slope=slope)
+    return slope * prediction_z
+
+
+def _attach_horizon_volatility(
+    panel: pd.DataFrame,
+    *,
+    fit_end: pd.Timestamp,
+    horizon: int,
+) -> tuple[pd.Series, dict[str, int]]:
+    """Forecast each row's excess-return volatility over the horizon.
+
+    The prediction target is a stock's return relative to the market, so the
+    model is fitted on daily excess returns. Rows without a forecast fall back
+    to the 20-bar volatility scaled by the square root of the horizon.
+    """
+    sigma = pd.Series(np.nan, index=panel.index, dtype=float)
+    methods = {"garch": 0, "ewma": 0}
+    excess_returns = panel["one_bar_log_return"] - panel["market_one_bar_log_return"]
+    for _ticker, rows in panel.groupby("Ticker", sort=False):
+        ordered = rows.sort_values("Date")
+        forecast, method = horizon_volatility(
+            pd.Series(excess_returns.loc[ordered.index]),
+            pd.Series(ordered["Date"]),
+            fit_end=fit_end,
+            horizon=horizon,
+        )
+        sigma.loc[ordered.index] = forecast.to_numpy()
+        methods[method] += 1
+    fallback = panel["vol_20"] * np.sqrt(float(horizon))
+    sigma = sigma.where(sigma > 0, fallback)
+    sigma = sigma.where(sigma > 0, float(np.nanmedian(sigma.to_numpy())))
+    return sigma, methods
+
+
+def volatility_scaling_exponent(residuals: np.ndarray, sigma: np.ndarray) -> float:
+    """Estimate how strongly prediction errors grow with volatility.
+
+    Fits ``log|error| = a + gamma * log(sigma)`` and returns gamma clipped to
+    [0, 1]: 1 means errors grow in proportion to volatility, 0 means they do
+    not depend on it. Bands then scale with ``sigma ** gamma``.
+    """
+    residuals = np.asarray(residuals, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    usable = np.isfinite(residuals) & np.isfinite(sigma) & (sigma > 0) & (residuals != 0)
+    if usable.sum() < 50:
+        return 1.0
+    log_sigma = np.log(sigma[usable])
+    variance = float(np.var(log_sigma))
+    if variance <= 0:
+        return 1.0
+    covariance = float(np.cov(log_sigma, np.log(np.abs(residuals[usable])), ddof=0)[0, 1])
+    return float(np.clip(covariance / variance, 0.0, 1.0))
+
+
 def _fit_predict_regressors(
     training_frame: pd.DataFrame,
     prediction_frame: pd.DataFrame,
+    *,
+    include_ranker: bool = False,
+    forecast_horizon: int = 1,
 ) -> tuple[dict[str, np.ndarray], dict[str, Pipeline]]:
     """Fit every healthy ensemble member and return its prediction vector."""
     predictions: dict[str, np.ndarray] = {}
@@ -329,6 +531,18 @@ def _fit_predict_regressors(
                 model=model_name,
                 fitting_error=str(ex),
             )
+    if include_ranker:
+        try:
+            ranker_prediction = _fit_predict_ranker(
+                training_frame,
+                prediction_frame,
+                forecast_horizon,
+            )
+        except Exception as ex:
+            bac_debug_kv("market_model.ranker", fitting_error=str(ex))
+            ranker_prediction = None
+        if ranker_prediction is not None:
+            predictions[RANKER_MODEL] = ranker_prediction
     return predictions, fitted_models
 
 
@@ -508,17 +722,72 @@ def rank_market_candidates(
         )
         return _empty_ranking_result()
 
-    by_dates = lambda dates: labeled[labeled["Date"].isin(dates)].copy()
+    # Volatility parameters are estimated on base-period data only.
+    sigma, volatility_methods = _attach_horizon_volatility(
+        panel,
+        # The base period is non-empty here, so its last date is a real Timestamp.
+        fit_end=cast(pd.Timestamp, pd.Timestamp(str(split["base"][-1]))),
+        horizon=forecast_horizon,
+    )
+    labeled["horizon_volatility"] = sigma.reindex(labeled.index)
+    latest["horizon_volatility"] = sigma.reindex(latest.index)
+
+    def by_dates(dates: pd.DatetimeIndex) -> pd.DataFrame:
+        return pd.DataFrame(labeled.loc[labeled["Date"].isin(dates.tolist())]).copy()
+
     base_frame = by_dates(split["base"])
     tuning_frame = by_dates(split["tuning"])
     pre_evaluation_frame = by_dates(split["pre_evaluation"])
     evaluation_frame = by_dates(split["evaluation"])
 
-    tuning_predictions, _ = _fit_predict_regressors(base_frame, tuning_frame)
-    weights, tuning_mae = _ensemble_weights(
-        tuning_frame["target_excess_log_return"],
-        tuning_predictions,
+    tuning_target = pd.Series(tuning_frame["target_excess_log_return"])
+    tuning_predictions, _ = _fit_predict_regressors(
+        base_frame,
+        tuning_frame,
+        include_ranker=True,
+        forecast_horizon=forecast_horizon,
     )
+
+    # The ranker joins the ensemble only if the tuning period's rank IC is
+    # positive with it and better than without it. Deciding on tuning data
+    # keeps the evaluation period untouched.
+    without_ranker = {
+        name: values for name, values in tuning_predictions.items() if name != RANKER_MODEL
+    }
+    tuning_rank_ic_without, _ = mean_rank_ic(
+        tuning_frame["Date"],
+        _weighted_prediction(without_ranker, _ensemble_weights(tuning_target, without_ranker)[0]),
+        tuning_target,
+    )
+    tuning_rank_ic_with = float("nan")
+    if RANKER_MODEL in tuning_predictions:
+        tuning_rank_ic_with, _ = mean_rank_ic(
+            tuning_frame["Date"],
+            _weighted_prediction(
+                tuning_predictions,
+                _ensemble_weights(tuning_target, tuning_predictions)[0],
+            ),
+            tuning_target,
+        )
+    use_ranker = bool(
+        RANKER_MODEL in tuning_predictions
+        and np.isfinite(tuning_rank_ic_with)
+        and tuning_rank_ic_with > 0
+        and (
+            not np.isfinite(tuning_rank_ic_without)
+            or tuning_rank_ic_with > tuning_rank_ic_without
+        )
+    )
+    if not use_ranker:
+        tuning_predictions = without_ranker
+    ranker_status = (
+        "included"
+        if use_ranker
+        else "not helpful on tuning period"
+        if np.isfinite(tuning_rank_ic_with)
+        else "unavailable"
+    )
+    weights, tuning_mae = _ensemble_weights(tuning_target, tuning_predictions)
     if not weights:
         return _empty_ranking_result()
 
@@ -527,6 +796,8 @@ def rank_market_candidates(
     evaluation_predictions, _ = _fit_predict_regressors(
         pre_evaluation_frame,
         evaluation_frame,
+        include_ranker=use_ranker,
+        forecast_horizon=forecast_horizon,
     )
     evaluation_blend = _weighted_prediction(evaluation_predictions, weights)
     if evaluation_blend.size == 0:
@@ -537,17 +808,34 @@ def rank_market_candidates(
         )
         return _empty_ranking_result()
 
-    # Tuning residuals define finite-sample 50% and 80% prediction intervals.
-    # Because those residuals precede evaluation, interval coverage is measured
-    # on data that did not set the interval widths.
+    # Bands are prediction +/- q * sigma, with sigma each row's own GARCH
+    # excess-return volatility. Tuning errors calibrate q; adaptive conformal
+    # inference then walks the evaluation dates, learning only from outcomes
+    # already realized, so the reported coverage is out-of-sample.
     tuning_blend = _weighted_prediction(tuning_predictions, weights)
-    tuning_residuals = (
-        tuning_frame["target_excess_log_return"].to_numpy(dtype=float) - tuning_blend
+    tuning_residuals = np.asarray(tuning_target, dtype=float) - tuning_blend
+    tuning_sigma = np.asarray(tuning_frame["horizon_volatility"], dtype=float)
+    # Errors rarely grow one-for-one with volatility; the exponent is learned
+    # on tuning errors and the band scale is sigma ** exponent.
+    scaling_exponent = volatility_scaling_exponent(tuning_residuals, tuning_sigma)
+    tuning_scores = np.abs(tuning_residuals) / tuning_sigma**scaling_exponent
+    evaluation_sigma = (
+        np.asarray(evaluation_frame["horizon_volatility"], dtype=float) ** scaling_exponent
     )
-    residual_q10, residual_q25, residual_q75, residual_q90 = np.quantile(
-        tuning_residuals,
-        [0.10, 0.25, 0.75, 0.90],
-    )
+    evaluation_scores = np.abs(
+        np.asarray(evaluation_frame["target_excess_log_return"], dtype=float)
+        - evaluation_blend
+    ) / evaluation_sigma
+    bands = {
+        coverage: adaptive_conformal_bands(
+            calibration_scores=tuning_scores,
+            evaluation_dates=pd.Series(evaluation_frame["Date"]),
+            evaluation_scores=evaluation_scores,
+            target_coverage=coverage,
+            horizon=forecast_horizon,
+        )
+        for coverage in (0.8, 0.5)
+    }
     evaluation_probability, latest_probability, probability_brier = _fit_probability_pipeline(
         base_frame,
         tuning_frame,
@@ -561,13 +849,19 @@ def rank_market_candidates(
     ].copy()
     evaluation["predicted_excess_return"] = evaluation_blend
     evaluation["probability_outperform"] = evaluation_probability
-    evaluation["lower_80"] = evaluation_blend + residual_q10
-    evaluation["upper_80"] = evaluation_blend + residual_q90
+    evaluation_half_width = bands[0.8].evaluation_quantile * evaluation_sigma
+    evaluation["lower_80"] = evaluation_blend - evaluation_half_width
+    evaluation["upper_80"] = evaluation_blend + evaluation_half_width
     evaluation["interval_hit_80"] = evaluation["target_excess_log_return"].between(
         evaluation["lower_80"], evaluation["upper_80"]
     )
 
-    latest_predictions, _ = _fit_predict_regressors(labeled, latest)
+    latest_predictions, _ = _fit_predict_regressors(
+        labeled,
+        latest,
+        include_ranker=use_ranker,
+        forecast_horizon=forecast_horizon,
+    )
     latest_blend = _weighted_prediction(latest_predictions, weights)
     if latest_blend.size == 0:
         bac_log_kv(
@@ -582,15 +876,13 @@ def rank_market_candidates(
     ranking = latest[["Ticker", "Date", "Close", *SENTIMENT_FEATURE_COLUMNS, "vol_20"]].copy()
     ranking["Expected excess return"] = latest_blend * 100.0
     ranking["Probability outperform"] = latest_probability * 100.0
-    ranking["Lower 50"] = (latest_blend + residual_q25) * 100.0
-    ranking["Upper 50"] = (latest_blend + residual_q75) * 100.0
-    ranking["Lower 80"] = (latest_blend + residual_q10) * 100.0
-    ranking["Upper 80"] = (latest_blend + residual_q90) * 100.0
-    ranking["Predicted volatility"] = (
-        latest["vol_20"].clip(lower=0).to_numpy(dtype=float)
-        * np.sqrt(forecast_horizon)
-        * 100.0
-    )
+    latest_sigma = np.asarray(latest["horizon_volatility"], dtype=float)
+    for coverage, label in ((0.5, "50"), (0.8, "80")):
+        half_width = bands[coverage].latest_quantile * latest_sigma**scaling_exponent
+        ranking[f"Lower {label}"] = (latest_blend - half_width) * 100.0
+        ranking[f"Upper {label}"] = (latest_blend + half_width) * 100.0
+    # GARCH (or EWMA fallback) excess-return volatility over the horizon.
+    ranking["Predicted volatility"] = latest_sigma * 100.0
     ranking["Model disagreement"] = latest_agreement_spread * 100.0
     ranking["Sentiment score"] = ranking["sentiment_24h"]
 
@@ -633,6 +925,11 @@ def rank_market_candidates(
         * 100.0
     )
     interval_coverage = float(evaluation["interval_hit_80"].mean() * 100.0)
+    rank_ic, rank_ic_t_stat = mean_rank_ic(
+        evaluation["Date"],
+        evaluation["predicted_excess_return"],
+        evaluation["target_excess_log_return"],
+    )
 
     # This directly backtests the app's selection rule: on every evaluation date,
     # rank the candidate panel, take the best ten, and measure realized excess.
@@ -662,6 +959,16 @@ def rank_market_candidates(
         "Directional accuracy": direction_accuracy,
         "Probability Brier score": probability_brier,
         "80% interval coverage": interval_coverage,
+        "50% interval coverage": bands[0.5].evaluation_coverage * 100.0,
+        "Rank IC": rank_ic,
+        "Rank IC t-stat": rank_ic_t_stat,
+        "LightGBM ranker": ranker_status,
+        "Tuning rank IC without ranker": tuning_rank_ic_without,
+        "Tuning rank IC with ranker": tuning_rank_ic_with,
+        "Interval method": "GARCH-scaled adaptive conformal",
+        "Volatility scaling exponent": scaling_exponent,
+        "Volatility models": volatility_methods,
+        "Adaptive 80% miss rate": bands[0.8].latest_alpha,
         "Top-10 realized mean excess": selection_mean_excess,
         "Top-10 realized hit rate": selection_hit_rate,
         "Sentiment-observed rows": int(panel["news_count_24h"].gt(0).sum()),

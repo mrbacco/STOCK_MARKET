@@ -14,6 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 RUN groupadd --system app && useradd --system --gid app --create-home app
 
+# LightGBM's Linux wheel links against the OpenMP runtime, which the slim
+# base image does not include.
+RUN apt-get update     && apt-get install -y --no-install-recommends libgomp1     && rm -rf /var/lib/apt/lists/*
+
 # The lockfile pins every transitive dependency and selects the CPU-only
 # PyTorch wheel, so the image does not download CUDA libraries it never uses.
 COPY requirements.lock ./
