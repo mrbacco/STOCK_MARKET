@@ -24,14 +24,11 @@ import streamlit as st
 
 from app_config import (
     DEFAULT_TICKER_SOURCE,
-    FTSE_MIB_SOURCE,
-    IRELAND_SOURCE,
     MANUAL_SOURCE,
+    MARKET_SOURCES,
     MAX_CHARTED_PERFORMERS,
-    US_SOURCE,
     VIEW_OPTIONS,
     initialize_session_defaults,
-    resolve_price_display,
 )
 from app_logging import (
     bac_debug_kv,
@@ -40,12 +37,8 @@ from app_logging import (
     bac_log_section,
 )
 from cache_control import invalidate_market_scope, set_cache_scope
-from market_data import (
-    company_names_by_ticker,
-    get_ftse_mib_top_performers,
-    get_iseq20_top_performers,
-    get_us_top_performers,
-)
+from market_data import company_names_by_ticker
+from market_sources import get_market_source
 from sentiment_service import ensure_background_sentiment_collector
 from sentiment_store import get_collector_status, update_watchlist
 from runtime_config import LIVE_CHART_REFRESH_SECONDS, RUN_IN_PROCESS_SENTIMENT
@@ -113,7 +106,7 @@ with st.sidebar:
 
     ticker_source = st.segmented_control(
         "Ticker source",
-        [IRELAND_SOURCE, FTSE_MIB_SOURCE, US_SOURCE, MANUAL_SOURCE],
+        [*MARKET_SOURCES, MANUAL_SOURCE],
         required=True,
         key="ticker_source",
         width="stretch",
@@ -183,18 +176,8 @@ with st.sidebar:
                 "|".join(normalized_scope_tickers) or "empty",
             ]
         )
-    elif ticker_source == IRELAND_SOURCE:
-        st.caption(
-            "Ranks the tracked ISEQ 20 Euronext Dublin listings by their latest available daily close."
-        )
-    elif ticker_source == FTSE_MIB_SOURCE:
-        st.caption(
-            "Ranks the Yahoo-supported FTSE MIB constituents by their latest available daily close and charts the top 10."
-        )
     else:
-        st.caption(
-            "Uses Yahoo Finance's U.S. large-cap daily-gainers screen and charts the top 10 equities."
-        )
+        st.caption(get_market_source(ticker_source or DEFAULT_TICKER_SOURCE).sidebar_caption)
 
     realtime_mode = st.toggle("Real-time Mode", value=False)
     bac_debug_kv("app.sidebar", realtime_mode=realtime_mode)
@@ -261,12 +244,15 @@ with st.sidebar:
     bac_debug_kv("app.sidebar", active_view=active_view)
 
 ticker_source = ticker_source or DEFAULT_TICKER_SOURCE
-if ticker_source == MANUAL_SOURCE:
-    # Manual mode can represent several currencies, so its market preset owns
-    # display formatting instead of the automatic-source configuration helper.
-    price_prefix, price_format, price_axis_label = manual_market_preset.price_display()
-else:
-    price_prefix, price_format, price_axis_label = resolve_price_display(ticker_source)
+# None in manual mode; otherwise the registry entry for the automatic source.
+market_source = get_market_source(ticker_source)
+# Manual mode can represent several currencies, so its market preset owns
+# display formatting; automatic sources carry their own currency display.
+price_prefix, price_format, price_axis_label = (
+    market_source.price_display()
+    if market_source is not None
+    else manual_market_preset.price_display()
+)
 bac_debug_kv(
     "app.display",
     ticker_source=ticker_source,
@@ -277,14 +263,8 @@ bac_debug_kv(
 )
 
 # Ticker resolution happens after the sidebar so each rerun uses the latest UI state.
-if ticker_source == IRELAND_SOURCE:
-    detected_performers = get_iseq20_top_performers()
-    tickers = detected_performers["Ticker"].tolist()
-elif ticker_source == FTSE_MIB_SOURCE:
-    detected_performers = get_ftse_mib_top_performers()
-    tickers = detected_performers["Ticker"].tolist()
-elif ticker_source == US_SOURCE:
-    detected_performers = get_us_top_performers()
+if market_source is not None:
+    detected_performers = market_source.load_performers()
     tickers = detected_performers["Ticker"].tolist()
 else:
     tickers = normalize_manual_tickers(
@@ -321,7 +301,7 @@ if realtime_mode:
     else:
         st.info("Live chart polling is off. Click 'Refresh now' to update values.")
 
-if ticker_source in {IRELAND_SOURCE, FTSE_MIB_SOURCE}:
+if market_source is not None and market_source.show_broker_access_note:
     st.caption(
         "This is a European market view, not a broker eligibility check. "
         "Confirm that your broker gives your account access to the relevant exchange."
@@ -342,12 +322,8 @@ bac_log_kv(
 # both in the UI and in the terminal logs.
 if not tickers:
     bac_log_section("app", "No tickers were available for the chosen source.")
-    if ticker_source == IRELAND_SOURCE:
-        st.error("No ISEQ 20 price data was returned. Try refreshing in a moment.")
-    elif ticker_source == FTSE_MIB_SOURCE:
-        st.error("No FTSE MIB constituent data was returned. Try refreshing in a moment.")
-    elif ticker_source == US_SOURCE:
-        st.error("No top performers were returned by the market screener. Try refreshing in a moment.")
+    if market_source is not None:
+        st.error(market_source.empty_error)
     else:
         st.warning("Choose at least one ticker from the selected market, or type a custom symbol.")
     st.stop()

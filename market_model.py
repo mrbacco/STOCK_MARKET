@@ -38,7 +38,6 @@ from app_config import (
     PANEL_TUNING_DATES,
     PRICE_FEATURE_COLUMNS,
     SENTIMENT_FEATURE_COLUMNS,
-    resolve_market_calendar,
 )
 from app_logging import (
     bac_debug_kv,
@@ -50,6 +49,7 @@ from app_logging import (
 from cache_control import cached_result
 from runtime_config import ANALYTICS_READ_ONLY
 from forecasting import build_feature_frame, prepare_model_history
+from market_sources import resolve_market_calendar
 
 
 ModelFactory = Callable[[], Pipeline]

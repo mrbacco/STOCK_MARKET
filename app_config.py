@@ -55,16 +55,8 @@ MIN_SENTIMENT_TRAINING_BARS = 10
 
 INTRADAY_FREQUENCIES = {"1m": "1min", "2m": "2min", "5m": "5min"}
 
-# `pandas_market_calendars` identifiers used to keep projected timestamps inside
-# real exchange sessions (including holidays and shortened trading days).
-MARKET_CALENDAR_BY_SOURCE = {
-    IRELAND_SOURCE: "XDUB",
-    FTSE_MIB_SOURCE: "XMIL",
-    US_SOURCE: "NYSE",
-}
-
-# Manual symbols do not carry a selected source name into every modeling call,
-# so their Yahoo suffix is enough to choose the most likely primary exchange.
+# `pandas_market_calendars` identifiers for manual symbols, chosen by Yahoo
+# suffix. Automatic sources register their exchange in `market_sources.py`.
 MARKET_CALENDAR_BY_SUFFIX = {
     ".IR": "XDUB",
     ".MI": "XMIL",
@@ -165,29 +157,6 @@ PANEL_TUNING_DATES = 30
 PANEL_EVALUATION_DATES = 30
 PANEL_RANDOM_STATE = 42
 
-
-def resolve_market_calendar(ticker_source: str | None, ticker: str = "") -> str:
-    """Return the best exchange-calendar identifier for the active context."""
-    if ticker_source in MARKET_CALENDAR_BY_SOURCE:
-        calendar_name = MARKET_CALENDAR_BY_SOURCE[ticker_source]
-    else:
-        ticker_upper = str(ticker).upper()
-        calendar_name = next(
-            (
-                calendar
-                for suffix, calendar in MARKET_CALENDAR_BY_SUFFIX.items()
-                if ticker_upper.endswith(suffix)
-            ),
-            "NYSE",
-        )
-
-    bac_debug_kv(
-        "app_config.resolve_market_calendar",
-        ticker_source=ticker_source,
-        ticker=ticker,
-        calendar_name=calendar_name,
-    )
-    return calendar_name
 
 # The Ireland mode is intentionally explicit and finite, rather than using a
 # dynamic screener, because the app wants a stable, named market universe.
@@ -298,22 +267,6 @@ def initialize_session_defaults(session_state: Any) -> None:
             message="Session defaults could not be applied outside Streamlit runtime.",
         )
         return
-
-
-def resolve_price_display(ticker_source: str) -> tuple[str, str, str]:
-    """Return the symbol, format string, and axis label for the active market."""
-    euro_symbol = "\u20ac"
-    if ticker_source in {IRELAND_SOURCE, FTSE_MIB_SOURCE}:
-        display = (euro_symbol, f"{euro_symbol}%.2f", "Price (EUR)")
-        bac_debug_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
-        return display
-    if ticker_source == US_SOURCE:
-        display = ("$", "$%.2f", "Price (USD)")
-        bac_debug_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
-        return display
-    display = ("", "%.2f", "Price (listing currency)")
-    bac_debug_kv("app_config.resolve_price_display", ticker_source=ticker_source, display=display)
-    return display
 
 
 def selected_horizon_label(realtime_mode: bool, interval: str, forecast_points: int) -> str:

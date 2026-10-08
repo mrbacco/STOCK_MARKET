@@ -22,14 +22,9 @@ import streamlit as st
 
 from app_config import (
     BACKTEST_TRAINING_POINTS,
-    FTSE_MIB_SOURCE,
-    IRELAND_SOURCE,
-    MARKET_SOURCES,
     MAX_BACKTEST_POINTS,
     MAX_CHARTED_PERFORMERS,
     MIN_BACKTEST_POINTS,
-    US_SOURCE,
-    resolve_market_calendar,
     selected_horizon_label,
 )
 from app_logging import bac_debug_kv, bac_log_kv, bac_log_list_preview, bac_log_section
@@ -43,6 +38,7 @@ from forecasting import (
     summarize_model_comparison,
 )
 from market_model import rank_market_candidates
+from market_sources import MANUAL_CHART_HEADING, get_market_source, resolve_market_calendar
 from market_data import (
     classify_price_histories,
     company_names_by_ticker,
@@ -225,20 +221,10 @@ def render_overview_view(
 
     # Market-sourced views simply show the ranked leaderboard because the source
     # selection itself already decided which universe is relevant.
-    if ticker_source in MARKET_SOURCES:
+    market_source = get_market_source(ticker_source)
+    if market_source is not None:
         bac_log_section("views.render_overview_view", "Rendering leaderboard-only overview.")
-        if ticker_source == IRELAND_SOURCE:
-            st.caption(
-                "The leaderboard ranks the latest available daily close from the tracked ISEQ 20 Euronext Dublin universe."
-            )
-        elif ticker_source == FTSE_MIB_SOURCE:
-            st.caption(
-                "The leaderboard ranks the latest available daily close across Yahoo-supported FTSE MIB constituents."
-            )
-        else:
-            st.caption(
-                "The leaderboard uses Yahoo Finance's predefined U.S. equity filter for liquid daily gainers."
-            )
+        st.caption(market_source.overview_caption)
 
         bac_log_kv(
             "views.render_overview_view",
@@ -332,7 +318,8 @@ def render_charts_view(
     # pool.  The pooled model below, rather than today's price move, decides
     # which ten tickers deserve charts.  Manual and intraday modes remain bounded
     # because users have already selected/order-ranked those symbols.
-    automatic_daily_ranking = ticker_source in MARKET_SOURCES and not realtime_mode
+    market_source = get_market_source(ticker_source)
+    automatic_daily_ranking = market_source is not None and not realtime_mode
     active_tickers = tickers if automatic_daily_ranking else tickers[:MAX_CHARTED_PERFORMERS]
     if automatic_daily_ranking:
         st.info(
@@ -472,7 +459,7 @@ def render_charts_view(
                 market_diagnostics,
             )
 
-    if ticker_source in MARKET_SOURCES:
+    if market_source is not None:
         if not market_ranking.empty:
             top_performers = market_ranking["Ticker"].tolist()
             leader_label = "Top predicted ticker"
@@ -487,15 +474,8 @@ def render_charts_view(
             daily_change_by_ticker = (
                 detected_performers.set_index("Ticker")["Daily change"].to_dict()
             )
-            if ticker_source == IRELAND_SOURCE:
-                leader_label = "Top ISEQ 20 daily mover"
-                performance_label = "Best ISEQ 20 daily change"
-            elif ticker_source == FTSE_MIB_SOURCE:
-                leader_label = "Top FTSE MIB daily mover"
-                performance_label = "Best FTSE MIB daily change"
-            else:
-                leader_label = "Top detected daily gainer"
-                performance_label = "Best detected daily change"
+            leader_label = market_source.fallback_leader_label
+            performance_label = market_source.fallback_performance_label
             leader_change = daily_change_by_ticker.get(top_performers[0], np.nan)
             performance_value = (
                 f"{leader_change:.2f}%" if pd.notna(leader_change) else "Unavailable"
@@ -544,7 +524,7 @@ def render_charts_view(
     col2.metric(leader_label, top_performers[0])
     col3.metric(performance_label, performance_value)
 
-    if ticker_source in MARKET_SOURCES:
+    if market_source is not None:
         bac_log_section("views.render_charts_view", "Rendering automatic market ranking.")
         if not market_ranking.empty:
             st.subheader("Model-ranked top 10 forward opportunities")
@@ -628,14 +608,7 @@ def render_charts_view(
             with st.expander("Model validation and weighting details"):
                 st.json(market_diagnostics)
         else:
-            fallback_heading = (
-                "ISEQ 20 top daily performers"
-                if ticker_source == IRELAND_SOURCE
-                else "FTSE MIB top 10 daily performers"
-                if ticker_source == FTSE_MIB_SOURCE
-                else "Detected top 10 daily gainers"
-            )
-            st.subheader(fallback_heading)
+            st.subheader(market_source.fallback_heading)
             st.caption(
                 "The pooled ranking is temporarily unavailable, so this table shows the current daily-move candidates."
             )
@@ -658,16 +631,12 @@ def render_charts_view(
         )
 
     horizon_label = selected_horizon_label(realtime_mode, interval, forecast_points)
-    if ticker_source in MARKET_SOURCES and not market_ranking.empty:
+    if market_source is not None and not market_ranking.empty:
         chart_heading = "Predicted top 10 - history, forecast, and uncertainty"
-    elif ticker_source == IRELAND_SOURCE:
-        chart_heading = "ISEQ 20 candidates - history and feature-based forecast"
-    elif ticker_source == FTSE_MIB_SOURCE:
-        chart_heading = "FTSE MIB candidates - history and feature-based forecast"
-    elif ticker_source == US_SOURCE:
-        chart_heading = "Detected U.S. candidates - history and feature-based forecast"
+    elif market_source is not None:
+        chart_heading = market_source.chart_heading
     else:
-        chart_heading = "Top momentum stocks - history and feature-based forecast"
+        chart_heading = MANUAL_CHART_HEADING
 
     st.subheader(chart_heading)
     st.caption(

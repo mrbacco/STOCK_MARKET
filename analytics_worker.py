@@ -16,18 +16,11 @@ from __future__ import annotations
 
 import argparse
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 
 import pandas as pd
 
-from app_config import (
-    FTSE_MIB_SOURCE,
-    IRELAND_SOURCE,
-    MARKET_SOURCES,
-    MAX_CHARTED_PERFORMERS,
-    US_SOURCE,
-    resolve_market_calendar,
-)
+from app_config import MARKET_SOURCES, MAX_CHARTED_PERFORMERS
 from app_logging import bac_log_kv, bac_log_list_preview, bac_log_section
 from cache_control import (
     dequeue_analytics_jobs,
@@ -35,14 +28,9 @@ from cache_control import (
     set_cache_scope,
 )
 from forecasting import backtest_forecast_model, forecast_feature_model
-from market_data import (
-    classify_price_histories,
-    get_ftse_mib_top_performers,
-    get_iseq20_top_performers,
-    get_price_history_batch,
-    get_us_top_performers,
-)
+from market_data import classify_price_histories, get_price_history_batch
 from market_model import rank_market_candidates
+from market_sources import get_market_source, resolve_market_calendar
 from model_monitoring import record_market_model_run
 from runtime_config import (
     ANALYTICS_HORIZONS,
@@ -50,13 +38,6 @@ from runtime_config import (
     ANALYTICS_PERIODS,
 )
 from sentiment_store import load_sentiment_history
-
-
-MARKET_LOADERS: dict[str, Callable[[], pd.DataFrame]] = {
-    IRELAND_SOURCE: get_iseq20_top_performers,
-    FTSE_MIB_SOURCE: get_ftse_mib_top_performers,
-    US_SOURCE: get_us_top_performers,
-}
 
 
 def precompute_market(source: str, period: str, horizon: int) -> dict[str, int]:
@@ -71,7 +52,7 @@ def precompute_market(source: str, period: str, horizon: int) -> dict[str, int]:
         horizon=horizon,
         status="started",
     )
-    performers = MARKET_LOADERS[source]()
+    performers = get_market_source(source).load_performers()
     tickers = performers.get("Ticker", pd.Series(dtype=str)).astype(str).tolist()
     price_data = get_price_history_batch(tickers, period=period, interval="1d")
     # Rank exactly the candidate pool the web tier ranks (fresh histories only)
