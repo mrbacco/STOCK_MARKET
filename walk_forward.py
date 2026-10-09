@@ -38,6 +38,7 @@ from market_model import (
     PanelConfig,
     blend_predictions,
     build_market_panel,
+    informative_feature_columns,
     select_ensemble,
 )
 from portfolio_backtest import top_n_backtest
@@ -108,12 +109,14 @@ def run_walk_forward(
         def rows(selected: np.ndarray) -> pd.DataFrame:
             return pd.DataFrame(labeled.loc[labeled["Date"].isin(selected.tolist())])
 
-        selection = select_ensemble(rows(base_dates), rows(tune_dates), horizon, feature_columns)
+        # Same rule as production: features too sparse in training are left out.
+        fold_columns = informative_feature_columns(rows(train_dates), feature_columns)
+        selection = select_ensemble(rows(base_dates), rows(tune_dates), horizon, fold_columns)
         if not selection.weights:
             continue
         test = rows(test_dates)
         blend, _components = blend_predictions(
-            rows(train_dates), test, selection, horizon, feature_columns
+            rows(train_dates), test, selection, horizon, fold_columns
         )
         if blend.size == 0:
             continue
@@ -151,6 +154,7 @@ def run_walk_forward(
         predictions, horizon=horizon, top_n=top_n, cost_bps=cost_bps
     )
     summary["Retraining points"] = len(folds)
+    summary["Model features"] = config.label
     bac_log_kv(
         "walk_forward.run",
         horizon=horizon,

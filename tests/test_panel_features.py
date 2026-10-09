@@ -20,6 +20,7 @@ from market_model import (
     TURBULENCE_FEATURE_COLUMNS,
     PanelConfig,
     build_market_panel,
+    informative_feature_columns,
 )
 
 PERIODS = 420
@@ -102,6 +103,19 @@ class PanelFeatureTest(unittest.TestCase):
             return [str(ticker) for ticker in day_rows.sort_values(by="ret_5")["Ticker"]]
 
         self.assertEqual(order(raw), order(ranked))
+
+    def test_features_without_training_variation_are_left_out(self) -> None:
+        panel = build_market_panel(_market(), 5, {}, PanelConfig(cross_sectional_ranks=True))
+        columns = PanelConfig(cross_sectional_ranks=True).feature_columns
+        # No news reached the training rows, so sentiment never varies there.
+        kept = informative_feature_columns(panel, columns)
+        self.assertNotIn("sentiment_24h", kept)
+        self.assertIn("ret_5", kept)
+        self.assertIn("market_ret_5", kept)
+        # Sentiment that varies on enough dates is kept.
+        varied = panel.copy()
+        varied["sentiment_24h"] = np.random.default_rng(0).normal(size=len(varied))
+        self.assertIn("sentiment_24h", informative_feature_columns(varied, columns))
 
 
 if __name__ == "__main__":

@@ -45,9 +45,13 @@ if TYPE_CHECKING:
     from chart_pipeline import ChartPrices, MarketRankingResult
     from market_data import PriceDataHealth
 
-HISTORY_PERIODS = ("1y", "2y", "5y")
-DEFAULT_HISTORY_PERIOD = "1y"
-DEFAULT_HORIZON = 3
+# The 12-month momentum factors need a year of prices before the first
+# training row; five years matches the training size the walk-forward test validated.
+HISTORY_PERIODS = ("2y", "5y")
+DEFAULT_HISTORY_PERIOD = "5y"
+# Holding periods in trading days; the walk-forward test favours one month.
+HOLDING_PERIODS = {5: "1 week", 21: "1 month"}
+DEFAULT_HORIZON = 21
 MAX_WATCHLIST = 25
 WATCHLIST_FILE = Path(__file__).resolve().parent / "data" / "watchlist.json"
 STOCK_PAGE = "app_pages/stock.py"
@@ -121,6 +125,11 @@ def initialize_session_state() -> None:
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+    # Values from older app versions fall back to the current defaults.
+    if st.session_state["history_period"] not in HISTORY_PERIODS:
+        st.session_state["history_period"] = DEFAULT_HISTORY_PERIOD
+    if st.session_state["forecast_horizon"] not in HOLDING_PERIODS:
+        st.session_state["forecast_horizon"] = DEFAULT_HORIZON
     # A universe removed from the registry must not leave the app stuck.
     if st.session_state["universe"] not in (*MARKET_SOURCES, WATCHLIST_KEY):
         st.session_state["universe"] = DEFAULT_UNIVERSE
@@ -144,9 +153,8 @@ def _on_watchlist_change() -> None:
 def render_sidebar() -> Selection:
     """Render the shared controls and return the resulting selection."""
     with st.sidebar:
-        st.header("Market", divider="gray")
         universe_key = st.selectbox(
-            "Stock universe",
+            "Market",
             (*MARKET_SOURCES, WATCHLIST_KEY),
             format_func=universe_label,
             key="universe",
@@ -172,20 +180,22 @@ def render_sidebar() -> Selection:
             tickers = _normalize_tickers(st.session_state.get("watchlist_tickers", []))
             companies = {ticker: company_name(ticker) for ticker in tickers}
 
-        st.header("Model", divider="gray")
-        period = st.segmented_control(
-            "History window",
-            HISTORY_PERIODS,
+        horizon = st.segmented_control(
+            "Holding period",
+            tuple(HOLDING_PERIODS),
+            format_func=HOLDING_PERIODS.__getitem__,
             required=True,
-            key="history_period",
-            help="Longer history gives the models more data to learn from and validate on.",
-        )
-        horizon = st.slider(
-            "Forecast horizon (trading days)",
-            min_value=1,
-            max_value=5,
             key="forecast_horizon",
+            help="How long you plan to hold. The model is strongest over one month.",
         )
+        with st.expander("Advanced settings"):
+            period = st.segmented_control(
+                "History window",
+                HISTORY_PERIODS,
+                required=True,
+                key="history_period",
+                help="Longer history gives the models more data to learn from and validate on.",
+            )
         cache_scope = f"{universe_key}:{period}:1d"
         if universe_key == WATCHLIST_KEY:
             # Each watchlist gets its own refresh scope.
@@ -203,7 +213,7 @@ def render_sidebar() -> Selection:
         tickers=list(tickers),
         companies=companies,
         period=str(period or DEFAULT_HISTORY_PERIOD),
-        horizon=int(horizon),
+        horizon=int(horizon or DEFAULT_HORIZON),
         cache_scope=cache_scope,
     )
     st.session_state["selection"] = selection
@@ -277,7 +287,25 @@ def walk_forward_summary(selection: Selection) -> dict | None:
     if selection.is_watchlist:
         return None
     stored = load_walk_forward(selection.universe_key, selection.horizon, with_predictions=False)
-    return stored.summary if stored is not None else None
+    # A run of an older feature set says nothing about today's model.
+    return stored.summary if stored is not None and stored.is_current else None
+
+
+def markets_with_evidence(horizon: int) -> list[tuple[str, float]]:
+    """Universes whose current model shows at least tentative tested evidence.
+
+    Returns (universe key, rank IC) pairs, strongest first.
+    """
+    from model_evidence import assess_walk_forward_evidence
+
+    found = []
+    for key in MARKET_SOURCES:
+        stored = load_walk_forward(key, horizon, with_predictions=False)
+        if stored is None or not stored.is_current:
+            continue
+        if assess_walk_forward_evidence(stored.summary).level in ("supported", "tentative"):
+            found.append((key, float(stored.summary.get("Rank IC", 0.0))))
+    return sorted(found, key=lambda item: item[1], reverse=True)
 
 
 def open_stock(ticker: str) -> None:

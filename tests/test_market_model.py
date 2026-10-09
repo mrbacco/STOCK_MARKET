@@ -16,8 +16,11 @@ import pandas as pd
 from market_model import _weighted_prediction, rank_market_candidates, split_panel_dates
 
 
-def _synthetic_market(ticker_count: int = 6, periods: int = 150) -> dict[str, pd.DataFrame]:
-    """Return a small correlated market with stable ticker-specific drift."""
+def _synthetic_market(ticker_count: int = 6, periods: int = 420) -> dict[str, pd.DataFrame]:
+    """Return a small correlated market with stable ticker-specific drift.
+
+    The 12-month factors need a year of prices before the first training row.
+    """
     generator = np.random.default_rng(1234)
     dates = pd.date_range("2025-01-02", periods=periods, freq="B")
     common_return = generator.normal(0.0002, 0.007, periods)

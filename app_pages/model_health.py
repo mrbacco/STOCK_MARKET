@@ -61,6 +61,12 @@ with st.container(border=True):
             if st.button(label, icon=":material/play_arrow:", key="run_walk_forward"):
                 start_walk_forward(universe, horizon)
                 st.rerun()
+        if stored is not None and not stored.is_current:
+            st.warning(
+                "This result was produced by an earlier version of the model, so it no longer "
+                "counts as evidence. Re-run the test.",
+                icon=":material/history:",
+            )
         if stored is not None:
             render_evidence(assess_ranking_evidence({}, stored.summary))
             render_walk_forward(stored, horizon)

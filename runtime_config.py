@@ -55,12 +55,12 @@ ANALYTICS_INTERVAL_SECONDS = max(
 )
 ANALYTICS_PERIODS = tuple(
     value.strip()
-    for value in os.getenv("ANALYTICS_PERIODS", "1y").split(",")
+    for value in os.getenv("ANALYTICS_PERIODS", "5y").split(",")
     if value.strip()
 )
 ANALYTICS_HORIZONS = tuple(
     int(value.strip())
-    for value in os.getenv("ANALYTICS_HORIZONS", "1,3,5").split(",")
+    for value in os.getenv("ANALYTICS_HORIZONS", "5,21").split(",")
     if value.strip().isdigit() and int(value.strip()) > 0
 )
 

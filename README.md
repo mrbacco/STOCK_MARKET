@@ -70,7 +70,9 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 ## Repository Structure
 
 - app.py: Entry point: page config, shared sidebar, sentiment collector, and top navigation.
-- app_pages/: One script per page (world_markets, market_ranking, stock, portfolio, news, model_health).
+- app_pages/: One script per page (today, stock, world_markets, and under Advanced market_ranking,
+  portfolio, news, model_health).
+- ideas.py: Plain-language highlights for the Today page: ideas, stocks to avoid, and market mood.
 - ui_state.py: Sidebar selection, persistent watchlist, and the per-session market analysis shared by pages.
 - ui_components.py: Shared Streamlit renderers (tables, evidence banner, charts, monitoring).
 - universe_catalog.py: The ten tracked stock universes with company names.
@@ -94,6 +96,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - database.py, cache_control.py, provider_runtime.py, runtime_config.py, market_snapshot_store.py:
   persistence, caching, provider protection, settings, and last-known-good price snapshots.
 - sentiment_worker.py, analytics_worker.py: Standalone production workers.
+- tools/: Research scripts: feature-variant experiments, same-dates comparisons, and
+  `refresh_walk_forward.py` to re-run every stored walk-forward after a model change.
 - tests/: Offline unit and end-to-end tests (`python -m unittest discover -s tests`).
 - requirements.txt / requirements.lock: Direct dependencies and the pinned Linux set for Docker and CI.
 
@@ -186,25 +190,27 @@ locks. A period, horizon, or manual portfolio that is not warm yet is placed on 
 Redis work queue; the UI remains responsive while `analytics_worker.py` prepares it. The
 `/_stcore/health` endpoint and proxy `/healthz` route are available to orchestrators.
 
-The default worker warms the common `1y` period and `1,3,5` horizons. Override
+The default worker warms the default `5y` history and the `5,21` (one week, one month) horizons. Override
 `ANALYTICS_PERIODS` or `ANALYTICS_HORIZONS` in `.env` when other combinations should be served
 without synchronous computation.
 
 ## How To Use
 
-1. **Global markets** opens first: scan indices, rates, currencies, commodities, and every stock
-   universe. Select a stock in the movers tables to open it.
-2. Pick a **Stock universe** in the sidebar (or **My watchlist** and add any Yahoo Finance
-   symbols), a **History window**, and a **Forecast horizon**.
-3. **Market ranking** trains the pooled model on the universe. Read the evidence banner first:
-   without a demonstrated edge the table shows unproven scores and no signals. Select a row to
-   open the stock.
-4. **Stock** shows the projection with its bands, the model's view, sentiment, and headlines.
-5. **Portfolio** shows what holding the model's top picks would have earned after costs.
-6. **News & sentiment** and **Model health** cover sentiment across the universe and model
-   validation, live scoring, and drift.
-7. **Refresh data** in the sidebar reloads prices, rankings, and the global overview. Set
-   `LOG_LEVEL=DEBUG` for detailed terminal logs.
+1. Pick a **Market** in the sidebar (or **My watchlist** and add any Yahoo Finance symbols) and
+   a **Holding period**: one week or one month.
+2. **Today** opens first, in plain language: the market's mood, up to three stocks to look at
+   with their expected move against the market, likely range, and what stands out, and the
+   stocks to be careful with. Ideas appear only when the multi-year test of the current model
+   shows at least early evidence for that market and holding period; otherwise the page says
+   so and suggests markets where it does.
+3. **Stock** shows one stock's projection with its bands, the model's view, sentiment, and
+   headlines. **Global markets** scans indices, rates, currencies, commodities, and every
+   stock universe.
+4. **Advanced** holds the full ranking table, the portfolio backtest, news and sentiment across
+   the market, and **Model health** (multi-year walk-forward test, live scoring, and drift).
+5. **Refresh data** in the sidebar reloads prices, rankings, and the global overview. The
+   history window is under **Advanced settings**. Set `LOG_LEVEL=DEBUG` for detailed terminal
+   logs.
 
 ## Forecasting Approach
 
@@ -212,11 +218,16 @@ The dashboard uses two complementary layers. A market-wide ensemble estimates ea
 future return relative to the selected market and chooses the top ten automatically. A
 ticker-level curve then estimates the future close for each displayed stock. Inputs include
 momentum, volatility, RSI, price structure, volume, market breadth, relative strength, beta,
-liquidity, and point-in-time financial-news sentiment. Daily forecasts are designed for short
-horizons of one to five exchange sessions.
+liquidity, point-in-time financial-news sentiment, and longer-term factors (12-1 and 6-1 month
+momentum, distance from the 52-week high, 60-day volatility, and the largest daily return of
+the past month). Stock-level features enter as each stock's percentile on that date, so the
+model compares stocks with each other rather than with their own past levels. On identical
+test dates in five universes, this feature set raised the one-month rank IC from 0.019 to
+0.050 compared with the base features. Holding periods are one week or one month (5 or 21
+exchange sessions); the evidence is stronger at one month.
 
 - It is directional, not predictive in a guaranteed sense.
-- It works best as a short-horizon market context tool.
+- It works best as a market context tool for ranking stocks against each other.
 - It should not be used as a sole decision engine for investing.
 
 The most reliable verdict comes from the multi-year walk-forward test on the Model health page.

@@ -54,15 +54,21 @@ if selection.tickers and update_watchlist(selection.companies):
     if sentiment_collector is not None and hasattr(sentiment_collector, "request_collection"):
         sentiment_collector.request_collection()
 
+# Everyday pages come first; the detailed tables and model checks sit under Advanced.
 page = st.navigation(
-    [
-        st.Page("app_pages/world_markets.py", title="Global markets", icon=":material/public:", default=True),
-        st.Page("app_pages/market_ranking.py", title="Market ranking", icon=":material/leaderboard:"),
-        st.Page("app_pages/stock.py", title="Stock", icon=":material/candlestick_chart:"),
-        st.Page("app_pages/portfolio.py", title="Portfolio", icon=":material/account_balance_wallet:"),
-        st.Page("app_pages/news.py", title="News & sentiment", icon=":material/newspaper:"),
-        st.Page("app_pages/model_health.py", title="Model health", icon=":material/monitor_heart:"),
-    ],
+    {
+        "": [
+            st.Page("app_pages/today.py", title="Today", icon=":material/lightbulb:", default=True),
+            st.Page("app_pages/stock.py", title="Stock", icon=":material/candlestick_chart:"),
+            st.Page("app_pages/world_markets.py", title="Global markets", icon=":material/public:"),
+        ],
+        "Advanced": [
+            st.Page("app_pages/market_ranking.py", title="Full ranking", icon=":material/leaderboard:"),
+            st.Page("app_pages/portfolio.py", title="Portfolio backtest", icon=":material/account_balance_wallet:"),
+            st.Page("app_pages/news.py", title="News & sentiment", icon=":material/newspaper:"),
+            st.Page("app_pages/model_health.py", title="Model health", icon=":material/monitor_heart:"),
+        ],
+    },
     position="top",
 )
 page.run()

@@ -19,6 +19,7 @@ import contextvars
 import io
 import json
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,13 @@ class StoredWalkForward:
     summary: dict[str, Any]
     folds: pd.DataFrame
     predictions: pd.DataFrame
+
+    @property
+    def is_current(self) -> bool:
+        """Whether the run tested the feature set production uses today."""
+        from market_model import PRODUCTION_PANEL_CONFIG
+
+        return self.summary.get("Model features", "base") == PRODUCTION_PANEL_CONFIG.label
 
 
 def save_walk_forward(
@@ -179,34 +187,44 @@ def _update(key: tuple[str, int], **changes: Any) -> None:
             setattr(status, name, value)
 
 
-def _execute(universe: str, horizon: int) -> None:
+def run_and_store_walk_forward(
+    universe: str,
+    horizon: int,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Run the production walk-forward for one universe and horizon, then save it."""
     from market_data import classify_price_histories, get_price_history_batch
     from market_sources import MARKET_SOURCE_REGISTRY
     from sentiment_store import load_sentiment_history
     from walk_forward import run_walk_forward
 
+    if progress is not None:
+        progress(0.0, "Loading five years of prices")
+    source = MARKET_SOURCE_REGISTRY[universe]
+    prices = get_price_history_batch(source.tickers, period=WALK_FORWARD_HISTORY, interval="1d")
+    health = classify_price_histories(prices, realtime_mode=False)
+    live = {ticker: prices[ticker] for ticker in health.live_tickers}
+    sentiment = {ticker: load_sentiment_history(ticker) for ticker in live}
+    result = run_walk_forward(live, sentiment, horizon=horizon, progress=progress)
+    if result.predictions.empty:
+        raise RuntimeError("Not enough history for a walk-forward test.")
+    save_walk_forward(
+        universe,
+        horizon,
+        summary=result.summary,
+        folds=result.folds,
+        predictions=result.predictions,
+    )
+    return result.summary
+
+
+def _execute(universe: str, horizon: int) -> None:
     key = (universe, int(horizon))
     try:
-        _update(key, message="Loading five years of prices", progress=0.0)
-        source = MARKET_SOURCE_REGISTRY[universe]
-        prices = get_price_history_batch(source.tickers, period=WALK_FORWARD_HISTORY, interval="1d")
-        health = classify_price_histories(prices, realtime_mode=False)
-        live = {ticker: prices[ticker] for ticker in health.live_tickers}
-        sentiment = {ticker: load_sentiment_history(ticker) for ticker in live}
-        result = run_walk_forward(
-            live,
-            sentiment,
-            horizon=horizon,
-            progress=lambda fraction, message: _update(key, progress=fraction, message=message),
-        )
-        if result.predictions.empty:
-            raise RuntimeError("Not enough history for a walk-forward test.")
-        save_walk_forward(
+        run_and_store_walk_forward(
             universe,
             horizon,
-            summary=result.summary,
-            folds=result.folds,
-            predictions=result.predictions,
+            progress=lambda fraction, message: _update(key, progress=fraction, message=message),
         )
         _update(key, running=False, progress=1.0, message="Done", error="")
     except Exception as ex:

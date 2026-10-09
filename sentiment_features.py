@@ -282,8 +282,21 @@ def build_sentiment_feature_frame(
         cutoffs[-1] = _utc_naive(latest_as_of)
 
     window = pd.Timedelta(hours=max(int(window_hours), 1))
+    # News usually covers only recent weeks. A bar with no article published in
+    # its current or previous window has all-zero features, so it skips the
+    # per-bar filtering below.
+    published = np.sort(news["published_at"].to_numpy(dtype="datetime64[ns]"))
+    cutoff_values = np.asarray(cutoffs, dtype="datetime64[ns]")
+    lookback = np.timedelta64(int((2 * window).value), "ns")
+    articles_in_range = np.searchsorted(published, cutoff_values, side="right") - np.searchsorted(
+        published, cutoff_values - lookback, side="right"
+    )
+    zero_row: dict[str, float] = dict.fromkeys(SENTIMENT_FEATURE_COLUMNS, 0.0)
     rows: list[dict[str, float]] = []
-    for cutoff in cutoffs:
+    for cutoff, article_count in zip(cutoffs, articles_in_range):
+        if article_count == 0:
+            rows.append(zero_row)
+            continue
         observable = news[
             (news["published_at"] <= cutoff)
             & (news["first_seen_at"] <= cutoff)

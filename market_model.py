@@ -93,6 +93,20 @@ class PanelConfig:
     turbulence: bool = False
 
     @property
+    def label(self) -> str:
+        """Short name stored with test results, so stale results can be spotted."""
+        groups = [
+            name
+            for name, enabled in (
+                ("factors", self.factor_features),
+                ("ranks", self.cross_sectional_ranks),
+                ("turbulence", self.turbulence),
+            )
+            if enabled
+        ]
+        return "+".join(["base", *groups])
+
+    @property
     def feature_columns(self) -> tuple[str, ...]:
         return (
             *PANEL_FEATURE_COLUMNS,
@@ -102,8 +116,10 @@ class PanelConfig:
 
 
 # Production keeps a configuration until the multi-year walk-forward test shows
-# that a variant raises rank IC across universes.
-PRODUCTION_PANEL_CONFIG = PanelConfig()
+# that a variant raises rank IC across universes. Factors plus per-date ranks
+# beat the base features on the same test dates in all five tested universes
+# at the 21-day horizon (mean rank IC 0.050 vs 0.019).
+PRODUCTION_PANEL_CONFIG = PanelConfig(factor_features=True, cross_sectional_ranks=True)
 
 
 def _regression_model_factories() -> dict[str, ModelFactory]:
@@ -330,8 +346,11 @@ def build_market_panel(
     )
     panel["target_outperformed"] = panel["target_excess_log_return"].gt(0).astype(int)
     panel = panel.replace([np.inf, -np.inf], np.nan)
-    # Raw 20-bar volatility stays available for band fallbacks after ranking.
+    # Raw values stay available after ranking: volatility for band fallbacks,
+    # sentiment for display.
     panel["vol_20_raw"] = panel["vol_20"]
+    panel["sentiment_24h_raw"] = panel["sentiment_24h"]
+    panel["news_count_24h_raw"] = panel["news_count_24h"]
     if config.turbulence:
         panel = panel.merge(_turbulence_by_date(panel), on="Date", how="left")
     if config.cross_sectional_ranks:
@@ -347,9 +366,41 @@ def build_market_panel(
         panel_rows=len(panel),
         panel_dates=panel["Date"].nunique(),
         usable_target_rows=int(panel["target_excess_log_return"].notna().sum()),
-        sentiment_rows=int(panel["news_count_24h"].gt(0).sum()),
+        sentiment_rows=int(panel["news_count_24h_raw"].gt(0).sum()),
     )
     return panel.reset_index(drop=True)
+
+
+# A stock-level feature must vary across stocks on at least this share of
+# training dates to be used.
+MIN_INFORMATIVE_DATE_SHARE = 0.05
+
+
+def informative_feature_columns(
+    frame: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Drop stock-level features that barely vary across stocks in training data.
+
+    News sentiment exists only since collection started, so long-horizon
+    training rows carry almost none of it while today's rows do. A model fitted
+    on near-constant values extrapolates wildly when they suddenly vary, so
+    such features are left out until enough history exists. Market-level
+    features are the same for every stock on a date and are always kept.
+    """
+    stock_columns = [column for column in feature_columns if column not in MARKET_LEVEL_COLUMNS]
+    if frame.empty or not stock_columns:
+        return feature_columns
+    varies = frame.groupby("Date")[stock_columns].std().fillna(0.0).gt(1e-12).mean()
+    kept = tuple(
+        column
+        for column in feature_columns
+        if column in MARKET_LEVEL_COLUMNS or float(varies[column]) >= MIN_INFORMATIVE_DATE_SHARE
+    )
+    dropped = [column for column in feature_columns if column not in kept]
+    if dropped:
+        bac_debug_kv("market_model.informative_features", dropped=dropped)
+    return kept
 
 
 def split_panel_dates(
@@ -905,6 +956,7 @@ def rank_market_candidates(
         .tail(1)
         .copy()
     )
+    feature_columns = informative_feature_columns(labeled, feature_columns)
     split = split_panel_dates(pd.DatetimeIndex(labeled["Date"].unique()), forecast_horizon)
     if not split or latest.empty:
         bac_log_kv(
@@ -1029,7 +1081,9 @@ def rank_market_candidates(
     component_matrix = np.column_stack(list(latest_predictions.values()))
     latest_agreement_spread = np.std(component_matrix, axis=1)
 
-    ranking = latest[["Ticker", "Date", "Close", *SENTIMENT_FEATURE_COLUMNS, "vol_20"]].copy()
+    ranking = latest[
+        ["Ticker", "Date", "Close", *SENTIMENT_FEATURE_COLUMNS, "sentiment_24h_raw", "vol_20"]
+    ].copy()
     ranking["Expected excess return"] = latest_blend * 100.0
     ranking["Probability outperform"] = latest_probability * 100.0
     latest_sigma = np.asarray(latest["horizon_volatility"], dtype=float)
@@ -1040,7 +1094,7 @@ def rank_market_candidates(
     # GARCH (or EWMA fallback) excess-return volatility over the horizon.
     ranking["Predicted volatility"] = latest_sigma * 100.0
     ranking["Model disagreement"] = latest_agreement_spread * 100.0
-    ranking["Sentiment score"] = ranking["sentiment_24h"]
+    ranking["Sentiment score"] = ranking["sentiment_24h_raw"]
 
     # The score rewards expected market-relative return and calibrated odds, and
     # penalizes model disagreement.  It is a ranking device, not a promised gain.
@@ -1127,7 +1181,7 @@ def rank_market_candidates(
         "Adaptive 80% miss rate": bands[0.8].latest_alpha,
         "Top-10 realized mean excess": selection_mean_excess,
         "Top-10 realized hit rate": selection_hit_rate,
-        "Sentiment-observed rows": int(panel["news_count_24h"].gt(0).sum()),
+        "Sentiment-observed rows": int(np.count_nonzero(np.asarray(panel["news_count_24h_raw"]) > 0)),
         "Universe note": "Backtest uses the supplied candidate universe; historical constituent snapshots are not available from Yahoo Finance.",
         "Model weights": weights,
         "Tuning MAE": tuning_mae,

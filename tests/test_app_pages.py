@@ -24,7 +24,8 @@ import sentiment_service
 import sentiment_store
 import ui_components
 
-PERIODS = 260
+# The 12-month factors need a year of prices before the first training row.
+PERIODS = 520
 
 
 def _synthetic_history(ticker: str) -> pd.DataFrame:
@@ -105,8 +106,32 @@ class AppPagesTest(unittest.TestCase):
         self.assertEqual([], [error.value for error in app.exception], page)
         return app
 
-    def test_global_markets_is_the_default_page(self) -> None:
+    def test_today_is_the_default_page_and_never_shows_untested_ideas(self) -> None:
         app = self._app()
+        self.assertTrue(any(header.value.startswith("Today in") for header in app.subheader))
+        banners = [*app.success, *app.info, *app.warning, *app.error]
+        self.assertTrue(any("Market mood" in banner.value for banner in banners))
+        # Synthetic prices have no stored walk-forward test, so no ideas are highlighted.
+        with patch("ui_state.load_walk_forward", return_value=None):
+            app.run()
+        self.assertTrue(any("No reliable ideas" in banner.value for banner in app.warning))
+        self.assertNotIn("See details", [button.label for button in app.button])
+
+    def test_today_highlights_ideas_when_the_model_has_evidence(self) -> None:
+        summary = {
+            "Rank IC": 0.06, "Rank IC t-stat": 1.6, "Positive quarters": 70.0,
+            "Portfolio Cumulative net excess": 40.0, "Top-N": 10, "Test years": 3.0,
+            "Reversal rank IC": 0.0, "Model features": "base+factors+ranks",
+        }
+        with patch("ui_state.walk_forward_summary", return_value=summary):
+            app = self._app()
+        self.assertEqual([], [error.value for error in app.exception])
+        markdown = " ".join(block.value for block in app.markdown)
+        self.assertIn("Stocks to look at", markdown)
+        self.assertIn("Early evidence", markdown)
+
+    def test_global_markets_page_renders(self) -> None:
+        app = self._open(self._app(), "app_pages/world_markets.py")
         # The overview loads in a background thread; wait for it, then rerender.
         deadline = time.monotonic() + 120
         while global_markets.overview_loading() and time.monotonic() < deadline:
