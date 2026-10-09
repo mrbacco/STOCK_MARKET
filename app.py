@@ -17,7 +17,6 @@ from __future__ import annotations
 import streamlit as st
 
 from app_logging import bac_debug_kv, bac_log_section
-from global_markets import ensure_overview_warmup
 from runtime_config import RUN_IN_PROCESS_SENTIMENT
 from sentiment_service import ensure_background_sentiment_collector
 from sentiment_store import update_watchlist
@@ -38,8 +37,8 @@ sentiment_collector = (
 )
 
 selection = render_sidebar()
-# Start loading the Global markets overview in the background right away.
-ensure_overview_warmup()
+# The Global markets page starts its own background loader. Starting it here
+# would compete with every other page's first load for Yahoo and the CPU.
 bac_debug_kv(
     "app.selection",
     universe=selection.universe_key,

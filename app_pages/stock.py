@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -155,7 +156,7 @@ with st.container(border=True):
     else:
         published = pd.to_datetime(articles["published_at"], utc=True)
         recent_week = articles[published >= published.max() - pd.Timedelta(days=7)]
-        tone = float(recent_week["sentiment"].mean())
+        tone = float(np.nanmean(np.asarray(recent_week["sentiment"], dtype=float)))
         mood = "positive" if tone >= 0.2 else "negative" if tone <= -0.2 else "mixed"
         st.caption(f"{len(recent_week)} headlines in the past week; overall tone is {mood}.")
         st.dataframe(

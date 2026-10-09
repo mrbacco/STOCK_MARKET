@@ -44,13 +44,14 @@ from market_data import (
     PriceDataHealth,
     get_price_history_batch,
 )
-from market_model import rank_market_candidates
+from market_model import PRODUCTION_PANEL_CONFIG, rank_market_candidates
 from market_sources import resolve_market_calendar
 from model_monitoring import (
     record_forecast,
     record_market_model_run,
     resolve_pending_forecasts,
 )
+from ranking_store import load_ranking, ranking_cache_key, save_ranking
 from sentiment_store import load_sentiment_history
 
 PRICE_ONLY_MODEL = "Price only"
@@ -228,8 +229,21 @@ def rank_live_candidates(
         ticker: load_sentiment_history(ticker)
         for ticker in health.live_tickers
     }
+    live_prices = {ticker: price_data[ticker] for ticker in health.live_tickers}
+    # Daily data changes once a session, so a ranking trained earlier today on
+    # the same prices is reused instead of retraining for 15-20 seconds.
+    cache_key = ranking_cache_key(
+        monitoring_market, forecast_horizon, PRODUCTION_PANEL_CONFIG.label, live_prices
+    )
+    saved = load_ranking(cache_key)
+    if saved is not None:
+        saved_ranking, saved_evaluation, saved_diagnostics = saved
+        bac_log_kv("chart_pipeline.ranking", market=monitoring_market, status="reused_saved")
+        return MarketRankingResult(
+            saved_ranking, saved_diagnostics, sentiment_by_ticker, saved_evaluation
+        )
     result = rank_market_candidates(
-        {ticker: price_data[ticker] for ticker in health.live_tickers},
+        live_prices,
         forecast_horizon=forecast_horizon,
         sentiment_by_ticker=sentiment_by_ticker,
         top_n=MAX_CHARTED_PERFORMERS,
@@ -253,6 +267,14 @@ def rank_live_candidates(
     evaluation = result.get("evaluation")
     if not isinstance(evaluation, pd.DataFrame):
         evaluation = pd.DataFrame()
+    if not ranking.empty and diagnostics:
+        save_ranking(
+            cache_key,
+            monitoring_market,
+            ranking=ranking,
+            evaluation=evaluation,
+            diagnostics=diagnostics,
+        )
     return MarketRankingResult(ranking, diagnostics, sentiment_by_ticker, evaluation)
 
 

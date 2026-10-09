@@ -473,9 +473,12 @@ def _compute_price_history_batch(
                 interval=interval,
                 group_by="ticker",
                 auto_adjust=False,
-                threads=False,
+                # Parallel downloads are about three times faster for a whole
+                # market; a ticker that times out is retried singly below and
+                # otherwise backfilled from its last saved snapshot.
+                threads=True,
                 progress=False,
-                timeout=4,
+                timeout=10,
             ),
             minimum_interval=YAHOO_MIN_INTERVAL_SECONDS,
         )

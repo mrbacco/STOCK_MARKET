@@ -30,6 +30,7 @@ from cache_control import get_cache_generation, invalidate_market_scope, set_cac
 from global_markets import reset_overview
 from walk_forward_store import load_walk_forward
 from market_data import classify_price_histories
+from ranking_store import clear_rankings
 from market_sources import (
     DEFAULT_UNIVERSE,
     MARKET_SOURCES,
@@ -212,6 +213,7 @@ def render_sidebar() -> Selection:
         set_cache_scope(cache_scope)
         if st.button("Refresh data", icon=":material/refresh:", width="stretch"):
             invalidate_market_scope(cache_scope)
+            clear_rankings(str(universe_key))
             reset_overview()
             st.session_state.pop("market_analysis", None)
             st.rerun()
@@ -284,8 +286,8 @@ def market_analysis(selection: Selection, *, compute: bool = True) -> MarketAnal
     ranking = MarketRankingResult()
     if not selection.is_watchlist and len(health.live_tickers) >= 2:
         with st.spinner(
-            "Training the model on this market. The first load after starting the app takes "
-            "one to two minutes; after that it is instant for 15 minutes.",
+            "Training the model on this market. This happens once a day per market and takes "
+            "about half a minute; after that it loads in seconds.",
             show_time=True,
         ):
             ranking = rank_live_candidates(

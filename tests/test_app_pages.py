@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import tempfile
 import time
 import unittest
+from pathlib import Path
 import zlib
 from unittest.mock import patch
 
@@ -20,6 +22,7 @@ from streamlit.testing.v1 import AppTest
 import chart_pipeline
 import global_markets
 import market_data
+import ranking_store
 import sentiment_service
 import sentiment_store
 import ui_components
@@ -66,7 +69,10 @@ def _leaderboard(universe_key):
 class AppPagesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # Synthetic rankings must never land in the real day-long ranking store.
+        cls.temp_dir = tempfile.TemporaryDirectory()
         cls.patchers = [
+            patch.object(ranking_store, "DEFAULT_RANKING_DB", Path(cls.temp_dir.name) / "rankings.db"),
             patch.object(market_data, "get_price_history_batch", side_effect=_price_batch),
             patch.object(global_markets, "get_price_history_batch", side_effect=_price_batch),
             patch.object(chart_pipeline, "get_price_history_batch", side_effect=_price_batch),
@@ -92,6 +98,7 @@ class AppPagesTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         for patcher in cls.patchers:
             patcher.stop()
+        cls.temp_dir.cleanup()
 
     def _app(self, universe: str = "ftsemib") -> AppTest:
         app = AppTest.from_file("app.py", default_timeout=180)

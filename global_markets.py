@@ -124,9 +124,9 @@ def performance_metrics(history: pd.DataFrame, *, level_changes: bool = False) -
         if len(close) > bars:
             metrics[label] = change(float(close[-1 - bars]))
     # One year is measured by calendar date: exchanges trade 245-255 sessions a
-    # year, so a fixed bar count fails on a one-year download.
-    # A download that starts a few days after the anniversary still counts.
-    year_ago = pd.Timestamp(frame["Date"].iloc[-1]) - pd.DateOffset(years=1)
+    # year, so a fixed bar count fails on a one-year download. A download that
+    # starts a few days after the anniversary still counts.
+    year_ago = frame["Date"].iloc[-1] - pd.DateOffset(years=1)
     before = frame.loc[frame["Date"] <= year_ago, "Close"]
     near = frame.loc[frame["Date"] <= year_ago + pd.Timedelta(days=4), "Close"]
     if not before.empty:

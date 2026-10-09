@@ -79,6 +79,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - market_sources.py: Universe registry (calendar, currency, description) and ticker lookups.
 - global_markets.py: Cross-asset and universe snapshots, and the background overview loader.
 - model_evidence.py: Out-of-sample evidence verdict that gates ranking signals.
+- ranking_store.py: Saves each day's trained ranking so restarts and new tabs reuse it
+  instead of retraining; Refresh data clears it.
 - walk_forward.py, walk_forward_store.py: Multi-year rolling walk-forward test, its background
   runner, and result storage.
 - portfolio_backtest.py: Non-overlapping top-N strategy backtest with trading costs.
