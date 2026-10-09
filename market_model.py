@@ -59,6 +59,52 @@ from volatility import horizon_volatility
 
 ModelFactory = Callable[[], Pipeline]
 
+# Documented equity factors (Jegadeesh-Titman momentum skipping the latest month,
+# George-Hwang 52-week-high proximity, low volatility, Bali-Cakici-Whitelaw MAX).
+FACTOR_FEATURE_COLUMNS = (
+    "momentum_12_1",
+    "momentum_6_1",
+    "high_52w_gap",
+    "volatility_60",
+    "max_return_21",
+)
+# Market-wide stress: how unusual today's cross-section of returns is versus the
+# trailing year (the turbulence index FinRL uses to cut risk).
+TURBULENCE_FEATURE_COLUMNS = ("turbulence", "turbulence_20d")
+# Columns identical for every stock on a date; ranking them within a date is
+# meaningless, so the cross-sectional transform leaves them unchanged.
+MARKET_LEVEL_COLUMNS = (
+    "market_ret_1",
+    "market_ret_5",
+    "market_ret_20",
+    "market_volatility_20",
+    "market_breadth_1",
+    *TURBULENCE_FEATURE_COLUMNS,
+)
+
+
+@dataclass(frozen=True)
+class PanelConfig:
+    """Which feature groups the pooled model uses."""
+
+    factor_features: bool = False
+    # Replace each stock-level feature with its percentile within the date.
+    cross_sectional_ranks: bool = False
+    turbulence: bool = False
+
+    @property
+    def feature_columns(self) -> tuple[str, ...]:
+        return (
+            *PANEL_FEATURE_COLUMNS,
+            *(FACTOR_FEATURE_COLUMNS if self.factor_features else ()),
+            *(TURBULENCE_FEATURE_COLUMNS if self.turbulence else ()),
+        )
+
+
+# Production keeps a configuration until the multi-year walk-forward test shows
+# that a variant raises rank IC across universes.
+PRODUCTION_PANEL_CONFIG = PanelConfig()
+
 
 def _regression_model_factories() -> dict[str, ModelFactory]:
     """Return fresh, deterministic ensemble members for each chronological fit."""
@@ -149,13 +195,45 @@ def _ticker_panel_frame(
     )
     frame["Ticker"] = ticker
     frame["one_bar_log_return"] = np.log(frame["Close"]).diff()
+    # Factor columns use only past closes; they matter only when the active
+    # PanelConfig includes them.
+    close = frame["Close"].astype(float)
+    frame["momentum_12_1"] = close.shift(21) / close.shift(252) - 1.0
+    frame["momentum_6_1"] = close.shift(21) / close.shift(126) - 1.0
+    frame["high_52w_gap"] = close / close.rolling(252, min_periods=126).max() - 1.0
+    frame["volatility_60"] = frame["one_bar_log_return"].rolling(60, min_periods=40).std()
+    frame["max_return_21"] = close.pct_change().rolling(21, min_periods=15).max()
     return frame.replace([np.inf, -np.inf], np.nan)
+
+
+def _turbulence_by_date(panel: pd.DataFrame, window: int = 252) -> pd.DataFrame:
+    """Daily Mahalanobis turbulence of the universe's returns, point in time.
+
+    Each date's cross-section of returns is compared with the mean and
+    covariance of the preceding `window` dates only.
+    """
+    returns = panel.pivot_table(index="Date", columns="Ticker", values="one_bar_log_return")
+    values = returns.to_numpy(dtype=float)
+    turbulence = np.full(len(returns), np.nan)
+    for row in range(window, len(returns)):
+        history = values[row - window:row]
+        usable = np.isfinite(history).all(axis=0) & np.isfinite(values[row])
+        if usable.sum() < 5:
+            continue
+        sample = history[:, usable]
+        deviation = values[row, usable] - sample.mean(axis=0)
+        covariance = np.cov(sample, rowvar=False)
+        turbulence[row] = float(deviation @ np.linalg.pinv(covariance) @ deviation) / usable.sum()
+    frame = pd.DataFrame({"Date": returns.index, "turbulence": np.log1p(turbulence)})
+    frame["turbulence_20d"] = frame["turbulence"].rolling(20, min_periods=10).mean()
+    return frame
 
 
 def build_market_panel(
     price_data: Mapping[str, pd.DataFrame],
     forecast_horizon: int,
     sentiment_by_ticker: Mapping[str, pd.DataFrame] | None = None,
+    config: PanelConfig = PRODUCTION_PANEL_CONFIG,
 ) -> pd.DataFrame:
     """Create the leakage-safe pooled feature and target table."""
     bac_debug_kv(
@@ -252,6 +330,17 @@ def build_market_panel(
     )
     panel["target_outperformed"] = panel["target_excess_log_return"].gt(0).astype(int)
     panel = panel.replace([np.inf, -np.inf], np.nan)
+    # Raw 20-bar volatility stays available for band fallbacks after ranking.
+    panel["vol_20_raw"] = panel["vol_20"]
+    if config.turbulence:
+        panel = panel.merge(_turbulence_by_date(panel), on="Date", how="left")
+    if config.cross_sectional_ranks:
+        stock_columns = [
+            column for column in config.feature_columns if column not in MARKET_LEVEL_COLUMNS
+        ]
+        panel[stock_columns] = (
+            panel.groupby("Date")[stock_columns].rank(pct=True) - 0.5
+        )
 
     bac_debug_kv(
         "market_model.build_market_panel",
@@ -387,12 +476,12 @@ def _new_ranker():
     )
 
 
-def _fit_ranker(frame: pd.DataFrame):
+def _fit_ranker(frame: pd.DataFrame, feature_columns: tuple[str, ...] = PANEL_FEATURE_COLUMNS):
     """Fit a LambdaRank model with one query group per date."""
     ordered = frame.sort_values(["Date", "Ticker"])
     ranker = _new_ranker()
     ranker.fit(
-        ordered.loc[:, PANEL_FEATURE_COLUMNS],
+        ordered.loc[:, list(feature_columns)],
         _relevance_grades(ordered),
         group=ordered.groupby("Date", sort=True).size().to_numpy(),
     )
@@ -403,6 +492,7 @@ def _fit_predict_ranker(
     training_frame: pd.DataFrame,
     prediction_frame: pd.DataFrame,
     forecast_horizon: int,
+    feature_columns: tuple[str, ...] = PANEL_FEATURE_COLUMNS,
 ) -> np.ndarray | None:
     """Predict excess returns from a LambdaRank model trained on daily order.
 
@@ -430,7 +520,9 @@ def _fit_predict_ranker(
     )
 
     holdout_z = _cross_sectional_zscore(
-        np.asarray(_fit_ranker(early).predict(holdout.loc[:, PANEL_FEATURE_COLUMNS])),
+        np.asarray(
+            _fit_ranker(early, feature_columns).predict(holdout.loc[:, list(feature_columns)])
+        ),
         holdout["Date"],
     )
     realized = np.asarray(holdout["target_excess_log_return"], dtype=float)
@@ -440,9 +532,9 @@ def _fit_predict_ranker(
         bac_debug_kv("market_model.ranker", status="no_holdout_signal", slope=slope)
         return None
 
-    final_ranker = _fit_ranker(training_frame)
+    final_ranker = _fit_ranker(training_frame, feature_columns)
     prediction_z = _cross_sectional_zscore(
-        np.asarray(final_ranker.predict(prediction_frame.loc[:, PANEL_FEATURE_COLUMNS])),
+        np.asarray(final_ranker.predict(prediction_frame.loc[:, list(feature_columns)])),
         prediction_frame["Date"],
     )
     bac_debug_kv("market_model.ranker", status="fitted", slope=slope)
@@ -474,7 +566,7 @@ def _attach_horizon_volatility(
         )
         sigma.loc[ordered.index] = forecast.to_numpy()
         methods[method] += 1
-    fallback = panel["vol_20"] * np.sqrt(float(horizon))
+    fallback = panel["vol_20_raw"] * np.sqrt(float(horizon))
     sigma = sigma.where(sigma > 0, fallback)
     sigma = sigma.where(sigma > 0, float(np.nanmedian(sigma.to_numpy())))
     return sigma, methods
@@ -506,13 +598,14 @@ def _fit_predict_regressors(
     *,
     include_ranker: bool = False,
     forecast_horizon: int = 1,
+    feature_columns: tuple[str, ...] = PANEL_FEATURE_COLUMNS,
 ) -> tuple[dict[str, np.ndarray], dict[str, Pipeline]]:
     """Fit every healthy ensemble member and return its prediction vector."""
     predictions: dict[str, np.ndarray] = {}
     fitted_models: dict[str, Pipeline] = {}
-    x_train = training_frame.loc[:, PANEL_FEATURE_COLUMNS]
+    x_train = training_frame.loc[:, list(feature_columns)]
     y_train = training_frame["target_excess_log_return"]
-    x_predict = prediction_frame.loc[:, PANEL_FEATURE_COLUMNS]
+    x_predict = prediction_frame.loc[:, list(feature_columns)]
 
     for model_name, factory in _regression_model_factories().items():
         try:
@@ -538,6 +631,7 @@ def _fit_predict_regressors(
                 training_frame,
                 prediction_frame,
                 forecast_horizon,
+                feature_columns,
             )
         except Exception as ex:
             bac_debug_kv("market_model.ranker", fitting_error=str(ex))
@@ -627,6 +721,7 @@ def select_ensemble(
     base_frame: pd.DataFrame,
     tuning_frame: pd.DataFrame,
     forecast_horizon: int,
+    feature_columns: tuple[str, ...] = PANEL_FEATURE_COLUMNS,
 ) -> EnsembleSelection:
     """Fit members on the base period and choose weights on the tuning period.
 
@@ -640,6 +735,7 @@ def select_ensemble(
         tuning_frame,
         include_ranker=True,
         forecast_horizon=forecast_horizon,
+        feature_columns=feature_columns,
     )
     without_ranker = {
         name: values for name, values in tuning_predictions.items() if name != RANKER_MODEL
@@ -682,6 +778,7 @@ def blend_predictions(
     prediction_frame: pd.DataFrame,
     selection: EnsembleSelection,
     forecast_horizon: int,
+    feature_columns: tuple[str, ...] = PANEL_FEATURE_COLUMNS,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Refit the selected members and return the weighted blend and components."""
     predictions, _ = _fit_predict_regressors(
@@ -689,6 +786,7 @@ def blend_predictions(
         prediction_frame,
         include_ranker=selection.use_ranker,
         forecast_horizon=forecast_horizon,
+        feature_columns=feature_columns,
     )
     return _weighted_prediction(predictions, selection.weights), predictions
 
@@ -699,6 +797,7 @@ def _fit_probability_pipeline(
     evaluation_frame: pd.DataFrame,
     full_labeled_frame: pd.DataFrame,
     latest_frame: pd.DataFrame,
+    feature_columns: tuple[str, ...] = PANEL_FEATURE_COLUMNS,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Fit, calibrate, evaluate, and refresh probability-of-outperformance."""
     default_evaluation = np.full(len(evaluation_frame), 0.5, dtype=float)
@@ -709,14 +808,14 @@ def _fit_probability_pipeline(
     try:
         base_classifier = _direction_classifier()
         base_classifier.fit(
-            base_frame.loc[:, PANEL_FEATURE_COLUMNS],
+            base_frame.loc[:, list(feature_columns)],
             base_frame["target_outperformed"],
         )
         tuning_raw = base_classifier.predict_proba(
-            tuning_frame.loc[:, PANEL_FEATURE_COLUMNS]
+            tuning_frame.loc[:, list(feature_columns)]
         )[:, 1]
         evaluation_raw = base_classifier.predict_proba(
-            evaluation_frame.loc[:, PANEL_FEATURE_COLUMNS]
+            evaluation_frame.loc[:, list(feature_columns)]
         )[:, 1]
 
         # Platt-style calibration is learned only on the tuning window.  If that
@@ -739,11 +838,11 @@ def _fit_probability_pipeline(
         # ranking.  The calibrator remains frozen from the historical tuning set.
         latest_classifier = _direction_classifier()
         latest_classifier.fit(
-            full_labeled_frame.loc[:, PANEL_FEATURE_COLUMNS],
+            full_labeled_frame.loc[:, list(feature_columns)],
             full_labeled_frame["target_outperformed"],
         )
         latest_raw = latest_classifier.predict_proba(
-            latest_frame.loc[:, PANEL_FEATURE_COLUMNS]
+            latest_frame.loc[:, list(feature_columns)]
         )[:, 1]
         latest_probability = (
             calibrator.predict_proba(latest_raw.reshape(-1, 1))[:, 1]
@@ -789,15 +888,18 @@ def rank_market_candidates(
     Read-only web replicas serve worker-warmed rankings and queue cold ones.
     """
     bac_log_section("market_model.rank_market_candidates", "Pooled ranking started.")
-    panel = build_market_panel(price_data, forecast_horizon, sentiment_by_ticker)
+    feature_columns = PRODUCTION_PANEL_CONFIG.feature_columns
+    panel = build_market_panel(
+        price_data, forecast_horizon, sentiment_by_ticker, PRODUCTION_PANEL_CONFIG
+    )
     if panel.empty:
         return _empty_ranking_result()
 
     labeled = panel.dropna(
-        subset=[*PANEL_FEATURE_COLUMNS, "target_excess_log_return"]
+        subset=[*feature_columns, "target_excess_log_return"]
     ).copy()
     latest = (
-        panel.dropna(subset=list(PANEL_FEATURE_COLUMNS))
+        panel.dropna(subset=list(feature_columns))
         .sort_values(["Ticker", "Date"])
         .groupby("Ticker", as_index=False)
         .tail(1)
@@ -831,7 +933,7 @@ def rank_market_candidates(
     pre_evaluation_frame = by_dates(split["pre_evaluation"])
     evaluation_frame = by_dates(split["evaluation"])
 
-    selection = select_ensemble(base_frame, tuning_frame, forecast_horizon)
+    selection = select_ensemble(base_frame, tuning_frame, forecast_horizon, feature_columns)
     if not selection.weights:
         return _empty_ranking_result()
     tuning_target = pd.Series(tuning_frame["target_excess_log_return"])
@@ -849,6 +951,7 @@ def rank_market_candidates(
         evaluation_frame,
         include_ranker=use_ranker,
         forecast_horizon=forecast_horizon,
+        feature_columns=feature_columns,
     )
     evaluation_blend = _weighted_prediction(evaluation_predictions, weights)
     if evaluation_blend.size == 0:
@@ -893,6 +996,7 @@ def rank_market_candidates(
         evaluation_frame,
         labeled,
         latest,
+        feature_columns,
     )
 
     evaluation = evaluation_frame[
@@ -912,6 +1016,7 @@ def rank_market_candidates(
         latest,
         include_ranker=use_ranker,
         forecast_horizon=forecast_horizon,
+        feature_columns=feature_columns,
     )
     latest_blend = _weighted_prediction(latest_predictions, weights)
     if latest_blend.size == 0:

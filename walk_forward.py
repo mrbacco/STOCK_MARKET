@@ -32,9 +32,14 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from app_config import PANEL_FEATURE_COLUMNS
 from app_logging import bac_log_kv
-from market_model import blend_predictions, build_market_panel, mean_rank_ic, select_ensemble
+from market_model import (
+    PRODUCTION_PANEL_CONFIG,
+    PanelConfig,
+    blend_predictions,
+    build_market_panel,
+    select_ensemble,
+)
 from portfolio_backtest import top_n_backtest
 
 DEFAULT_RETRAIN_EVERY = 63
@@ -70,13 +75,15 @@ def run_walk_forward(
     top_n: int = 10,
     cost_bps: float = 10.0,
     progress: ProgressCallback | None = None,
+    config: PanelConfig = PRODUCTION_PANEL_CONFIG,
 ) -> WalkForwardResult:
     """Replay the production ensemble over the full history, fold by fold."""
-    panel = build_market_panel(price_data, horizon, sentiment_by_ticker)
+    feature_columns = config.feature_columns
+    panel = build_market_panel(price_data, horizon, sentiment_by_ticker, config)
     if panel.empty:
         return WalkForwardResult(pd.DataFrame(), pd.DataFrame(), {})
     labeled = pd.DataFrame(
-        panel.dropna(subset=[*PANEL_FEATURE_COLUMNS, "target_excess_log_return"])
+        panel.dropna(subset=[*feature_columns, "target_excess_log_return"])
     )
     dates = np.sort(np.asarray(labeled["Date"].unique()))
     starts = _fold_starts(len(dates), min_train=min_train_dates, retrain_every=retrain_every)
@@ -101,11 +108,13 @@ def run_walk_forward(
         def rows(selected: np.ndarray) -> pd.DataFrame:
             return pd.DataFrame(labeled.loc[labeled["Date"].isin(selected.tolist())])
 
-        selection = select_ensemble(rows(base_dates), rows(tune_dates), horizon)
+        selection = select_ensemble(rows(base_dates), rows(tune_dates), horizon, feature_columns)
         if not selection.weights:
             continue
         test = rows(test_dates)
-        blend, _components = blend_predictions(rows(train_dates), test, selection, horizon)
+        blend, _components = blend_predictions(
+            rows(train_dates), test, selection, horizon, feature_columns
+        )
         if blend.size == 0:
             continue
         blocks.append(
@@ -198,6 +207,9 @@ def summarize_walk_forward(
     """Headline statistics of a walk-forward run."""
     if predictions.empty:
         return {}
+    # Hold at most a quarter of the universe so top and bottom never overlap.
+    stocks_per_date = int(np.median(np.asarray(predictions.groupby("Date")["Ticker"].nunique())))
+    top_n = max(1, min(int(top_n), stocks_per_date // 4))
     model_ic = _daily_rank_ic(predictions, "predicted_excess_return")
     momentum_ic = _daily_rank_ic(predictions, "momentum_20d")
     reversal_ic = _daily_rank_ic(predictions, "reversal_5d")
