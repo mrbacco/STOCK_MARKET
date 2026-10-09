@@ -13,7 +13,14 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from ideas import describe_stock, market_mood, pick_ideas, risk_level, stock_traits
+from ideas import (
+    describe_stock,
+    forecast_cone,
+    market_mood,
+    pick_ideas,
+    risk_level,
+    stock_traits,
+)
 
 PERIODS = 300
 
@@ -93,6 +100,22 @@ class IdeasTest(unittest.TestCase):
             shocked[f"S{index}"] = frame.assign(Close=close)
         self.assertEqual("nervous", market_mood(shocked).level)
         self.assertEqual("unknown", market_mood({}).level)
+
+    def test_forecast_cone_starts_at_the_last_close_and_ends_at_the_model_range(self) -> None:
+        cone = forecast_cone(
+            pd.Timestamp("2026-10-09"), 100.0, 21, expected_pct=2.0, low_pct=-5.0, high_pct=9.0
+        )
+        self.assertEqual(22, len(cone))
+        first, last = cone.iloc[0], cone.iloc[-1]
+        self.assertEqual(pd.Timestamp("2026-10-09"), first["Date"])
+        self.assertTrue(first["Low"] == first["Expected"] == first["High"] == 100.0)
+        self.assertAlmostEqual(102.0, last["Expected"])
+        self.assertAlmostEqual(95.0, last["Low"])
+        self.assertAlmostEqual(109.0, last["High"])
+        # Business days only, and the range never inverts.
+        self.assertTrue((cone["Date"].iloc[1:].dt.dayofweek < 5).all())
+        self.assertTrue((cone["Low"] <= cone["Expected"]).all())
+        self.assertTrue((cone["Expected"] <= cone["High"]).all())
 
 
 if __name__ == "__main__":

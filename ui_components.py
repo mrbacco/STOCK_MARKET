@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -469,3 +470,38 @@ def render_walk_forward(stored: StoredWalkForward, horizon: int) -> None:
                 stored.folds.assign(Weights=stored.folds["Weights"].astype(str)),
                 hide_index=True,
             )
+
+
+def price_cone_chart(
+    history: pd.DataFrame,
+    cone: pd.DataFrame | None,
+    *,
+    y_label: str,
+    height: int = 300,
+) -> alt.LayerChart | alt.Chart:
+    """Past closes, plus the model's expected path and likely range when given."""
+    past = history[["Date", "Close"]].assign(Date=lambda frame: pd.to_datetime(frame["Date"]))
+    x = alt.X("Date:T", title=None)
+    price = alt.Chart(past).mark_line(strokeWidth=1.5).encode(
+        x=x,
+        y=alt.Y("Close:Q", title=y_label, scale=alt.Scale(zero=False)),
+        tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Close:Q", format=",.2f")],
+    )
+    if cone is None or cone.empty:
+        return price.properties(height=height)
+    band = alt.Chart(cone).mark_area(opacity=0.25).encode(
+        x=x,
+        y="Low:Q",
+        y2="High:Q",
+        tooltip=[
+            alt.Tooltip("Date:T"),
+            alt.Tooltip("Low:Q", title="Likely low", format=",.2f"),
+            alt.Tooltip("High:Q", title="Likely high", format=",.2f"),
+        ],
+    )
+    expected = alt.Chart(cone).mark_line(strokeDash=[5, 4], strokeWidth=1.5).encode(
+        x=x,
+        y="Expected:Q",
+        tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Expected:Q", format=",.2f")],
+    )
+    return alt.LayerChart(layer=[band, price, expected], height=height)

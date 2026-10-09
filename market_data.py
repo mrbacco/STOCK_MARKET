@@ -167,6 +167,10 @@ def format_price_history(history: pd.DataFrame) -> pd.DataFrame:
         columns={date_column: "Date"}
     )
     formatted["Date"] = pd.to_datetime(formatted["Date"]).dt.tz_localize(None)
+    # A batch download aligns every ticker to the union of all exchanges'
+    # sessions, so a stock whose exchange did not trade (or has not published
+    # yet) gets a row without a close. Those rows are not prices.
+    formatted = formatted.dropna(subset=["Close"]).reset_index(drop=True)
 
     bac_debug_kv(
         "market_data.format_price_history",

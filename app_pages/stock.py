@@ -14,6 +14,7 @@ import streamlit as st
 
 from chart_pipeline import build_ticker_forecast, record_displayed_forecast
 from global_markets import performance_metrics
+from ideas import forecast_cone
 from market_data import get_news, get_price_history_batch
 from market_sources import WATCHLIST_KEY, company_name, source_for_ticker
 from model_evidence import assess_walk_forward_evidence
@@ -23,12 +24,14 @@ from ui_components import (
     backtest_caption,
     backtest_column_config,
     forecast_figure,
+    price_cone_chart,
     render_forecast_caption,
     render_forecast_status,
 )
 from ui_state import HOLDING_PERIODS, current_selection, market_analysis, walk_forward_summary
 
-TRADING_DAYS_PER_YEAR = 252
+# Six months keeps a one-month forecast cone readable next to the history.
+CHART_SESSIONS = 126
 EVIDENCE_BADGES = {
     "supported": ":green-badge[:material/verified: Tested edge]",
     "tentative": ":orange-badge[:material/science: Early evidence, not proven]",
@@ -37,7 +40,9 @@ EVIDENCE_BADGES = {
 }
 
 selection = current_selection()
-analysis = market_analysis(selection, compute=False)
+# The model view and the forecast cone need the market ranking; it is saved for
+# the day, so this is usually instant.
+analysis = market_analysis(selection, compute=not selection.is_watchlist)
 
 # Stocks opened from the Global markets page may sit outside this universe.
 requested = st.session_state.get("stock_ticker")
@@ -139,9 +144,32 @@ with st.container(border=True):
             )
 
 # --- Price ---------------------------------------------------------------------
-st.markdown("**Price, past year**")
-year = history.tail(TRADING_DAYS_PER_YEAR)[["Date", "Close"]]
-st.line_chart(year, x="Date", y="Close", y_label=price_axis_label, x_label="", height=280)
+recent = history.dropna(subset=["Close"]).tail(CHART_SESSIONS)
+cone = None
+if not ranking_row.empty:
+    forecast_row = ranking_row.iloc[0]
+    cone = forecast_cone(
+        pd.Timestamp(recent["Date"].iloc[-1]),
+        float(recent["Close"].iloc[-1]),
+        selection.horizon,
+        expected_pct=float(forecast_row["Expected excess return"]),
+        low_pct=float(forecast_row["Lower 80"]),
+        high_pct=float(forecast_row["Upper 80"]),
+    )
+st.markdown(
+    f"**Price, past 6 months and next {period_label}**"
+    if cone is not None
+    else "**Price, past 6 months**"
+)
+st.altair_chart(price_cone_chart(recent, cone, y_label=price_axis_label))
+if cone is not None:
+    final = cone.iloc[-1]
+    st.caption(
+        f"Dashed line: expected path to {price_prefix}{final['Expected']:,.2f}. Shaded: likely "
+        f"range, {price_prefix}{final['Low']:,.2f} to {price_prefix}{final['High']:,.2f} "
+        "(8 outcomes in 10). The model predicts moves against the market, so this assumes "
+        "the market itself stays flat."
+    )
 
 # --- News ----------------------------------------------------------------------
 with st.container(border=True):

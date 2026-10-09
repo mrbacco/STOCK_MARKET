@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -222,3 +223,37 @@ def market_mood(price_data: Mapping[str, pd.DataFrame]) -> MarketMood:
     if above <= 0.4 and month < 0:
         return MarketMood("weak", "Weak", f"Most stocks are falling. {detail}")
     return MarketMood("mixed", "Mixed", f"No clear direction. {detail}")
+
+
+def forecast_cone(
+    last_date: Any,
+    last_close: float,
+    horizon: int,
+    *,
+    expected_pct: float,
+    low_pct: float,
+    high_pct: float,
+) -> pd.DataFrame:
+    """Daily path of the expected price and its likely range over the horizon.
+
+    The model predicts each stock's move relative to its market, so the cone
+    assumes a flat market. The expected path moves linearly to its target and
+    the range widens with the square root of time, as uncertainty does for
+    prices; at the horizon it equals the model's 80% range. The first row is
+    the last close, so the cone starts where the price line ends.
+    """
+    steps = max(int(horizon), 1)
+    start = pd.Timestamp(last_date)
+    future = pd.bdate_range(start + pd.offsets.BDay(1), periods=steps)
+    dates = pd.DatetimeIndex([start, *future])
+    fraction = np.arange(steps + 1) / steps
+    expected = expected_pct * fraction
+    spread = np.sqrt(fraction)
+    return pd.DataFrame(
+        {
+            "Date": dates,
+            "Expected": last_close * (1 + expected / 100.0),
+            "Low": last_close * (1 + (expected + (low_pct - expected_pct) * spread) / 100.0),
+            "High": last_close * (1 + (expected + (high_pct - expected_pct) * spread) / 100.0),
+        }
+    )
