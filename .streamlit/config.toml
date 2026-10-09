@@ -6,6 +6,11 @@ port = 8501
 enableXsrfProtection = true
 enableCORS = true
 maxUploadSize = 10
+# The watcher scans every loaded module after each run. With FinBERT loaded it
+# touches lazy transformers vision modules that need torchvision and logs about
+# a hundred tracebacks per scan. Run with --server.fileWatcherType auto to get
+# hot reload while editing code.
+fileWatcherType = "none"
 
 [browser]
 gatherUsageStats = false

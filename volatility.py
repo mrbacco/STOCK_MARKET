@@ -65,11 +65,13 @@ def _garch_horizon_volatility(
     if len(fit_sample) < MIN_GARCH_FIT_RETURNS:
         return None
     with warnings.catch_warnings():
-        # Convergence problems are detected from the result instead.
+        # Convergence problems are detected from the result instead. arch adds
+        # its own process-wide "always" filter unless show_warning is False,
+        # which defeats catch_warnings when sessions fit in parallel threads.
         warnings.simplefilter("ignore")
         fitted = arch_model(
             fit_sample, mean="Zero", vol="GARCH", p=1, q=1, rescale=False
-        ).fit(disp="off")
+        ).fit(disp="off", show_warning=False)
     parameters = dict(
         zip(map(str, fitted.params.index), np.asarray(fitted.params, dtype=float))
     )

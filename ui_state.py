@@ -16,6 +16,8 @@ and model-health pages.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,6 +57,13 @@ DEFAULT_HORIZON = 21
 MAX_WATCHLIST = 25
 WATCHLIST_FILE = Path(__file__).resolve().parent / "data" / "watchlist.json"
 STOCK_PAGE = "app_pages/stock.py"
+# A finished analysis is shared by every browser session for this long, so a
+# new tab or a page reload does not retrain the model. It matches the ranking
+# cache TTL; Refresh data starts a new generation and recomputes at once.
+SHARED_ANALYSIS_TTL_SECONDS = 900
+MAX_SHARED_ANALYSES = 24
+_shared_analyses: dict[tuple, tuple[float, MarketAnalysis]] = {}
+_shared_analyses_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -244,6 +253,10 @@ def market_analysis(selection: Selection, *, compute: bool = True) -> MarketAnal
     cached = st.session_state.get("market_analysis")
     if cached is not None and cached[0] == key:
         return cached[1]
+    shared = _shared_analysis(key)
+    if shared is not None:
+        st.session_state["market_analysis"] = (key, shared)
+        return shared
     if not compute or not selection.tickers:
         return None
 
@@ -270,7 +283,11 @@ def market_analysis(selection: Selection, *, compute: bool = True) -> MarketAnal
     resolved = resolve_matured_forecasts(prices.price_data, health, monitoring_market)
     ranking = MarketRankingResult()
     if not selection.is_watchlist and len(health.live_tickers) >= 2:
-        with st.spinner("Training the market-wide ensemble and ranking the universe..."):
+        with st.spinner(
+            "Training the model on this market. The first load after starting the app takes "
+            "one to two minutes; after that it is instant for 15 minutes.",
+            show_time=True,
+        ):
             ranking = rank_live_candidates(
                 prices.price_data,
                 health,
@@ -279,7 +296,31 @@ def market_analysis(selection: Selection, *, compute: bool = True) -> MarketAnal
             )
     analysis = MarketAnalysis(prices, health, ranking, resolved)
     st.session_state["market_analysis"] = (key, analysis)
+    _store_shared_analysis(key, analysis)
     return analysis
+
+
+def _shared_analysis(key: tuple) -> MarketAnalysis | None:
+    with _shared_analyses_lock:
+        entry = _shared_analyses.get(key)
+        if entry is None or time.monotonic() - entry[0] > SHARED_ANALYSIS_TTL_SECONDS:
+            return None
+        return entry[1]
+
+
+def _store_shared_analysis(key: tuple, analysis: MarketAnalysis) -> None:
+    with _shared_analyses_lock:
+        now = time.monotonic()
+        expired = [
+            entry_key
+            for entry_key, (stored_at, _analysis) in _shared_analyses.items()
+            if now - stored_at > SHARED_ANALYSIS_TTL_SECONDS
+        ]
+        for entry_key in expired:
+            del _shared_analyses[entry_key]
+        _shared_analyses[key] = (now, analysis)
+        while len(_shared_analyses) > MAX_SHARED_ANALYSES:
+            del _shared_analyses[min(_shared_analyses, key=lambda k: _shared_analyses[k][0])]
 
 
 def walk_forward_summary(selection: Selection) -> dict | None:

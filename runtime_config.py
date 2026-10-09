@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import os
 
+# joblib otherwise shells out to count physical cores and prints a traceback
+# on Windows when that fails; the logical count is what it falls back to anyway.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 1))
+
 
 def env_bool(name: str, default: bool = False) -> bool:
     """Read a forgiving boolean environment variable."""

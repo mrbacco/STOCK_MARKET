@@ -141,6 +141,10 @@ python -m unittest discover -s tests
 streamlit run app.py
 ```
 
+Hot reload is off in `.streamlit/config.toml`, because Streamlit's file watcher logs
+tracebacks for lazy `transformers` modules once FinBERT loads. While editing code, run
+`streamlit run app.py --server.fileWatcherType auto` instead.
+
 For a lighter Windows laptop run without Docker or the continuous FinBERT
 collector, use:
 
