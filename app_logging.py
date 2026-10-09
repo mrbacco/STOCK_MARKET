@@ -87,11 +87,6 @@ def _emit_list_preview(
     _LOGGER.log(level, "%s | %s", section, message)
 
 
-def bac_log(message: str) -> None:
-    """Log one timestamped INFO message that is easy to grep in the terminal."""
-    _LOGGER.info("%s", message)
-
-
 def bac_log_section(section: str, message: str) -> None:
     """Add a simple section prefix so related logs are easier to scan together."""
     _LOGGER.info("%s | %s", section, message)

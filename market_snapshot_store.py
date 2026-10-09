@@ -80,10 +80,9 @@ def initialize_market_snapshot_store(
                 PRIMARY KEY (ticker, period_name, interval_name, bar_at)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_market_price_snapshot_lookup
-                ON market_price_snapshots (
-                    ticker, period_name, interval_name, bar_at
-                );
+            -- The primary key already indexes these columns in this order; an
+            -- older separate index duplicated it and doubled the index size.
+            DROP INDEX IF EXISTS idx_market_price_snapshot_lookup;
             """
         )
     return path
