@@ -49,6 +49,7 @@ from runtime_config import (
     MARKET_DATA_LICENSE_CONFIRMED,
     MARKET_DATA_PROVIDER,
     RUN_IN_PROCESS_SENTIMENT,
+    PRICE_SNAPSHOT_REUSE_HOURS,
     SNAPSHOT_PREVIEW_MAX_AGE_HOURS,
     YAHOO_MIN_INTERVAL_SECONDS,
 )
@@ -603,7 +604,73 @@ def get_price_history_batch(
     interval: str,
 ) -> dict[str, pd.DataFrame]:
     """Fetch histories with targeted generation invalidation for this market."""
+    recent = _recent_saved_histories(list(tickers), period, interval)
+    if recent is not None:
+        return recent
     return _compute_price_history_batch(list(tickers), period, interval)
+
+
+# Daily histories of these lengths change only by their newest bar, so a copy
+# saved a few hours ago is as good as a fresh download for the models.
+REUSABLE_SNAPSHOT_PERIODS = frozenset({"1y", "2y", "5y"})
+# Tickers whose saved copies must be newer than the time Refresh was pressed.
+_LIVE_REQUIRED_AFTER: dict[str, pd.Timestamp] = {}
+_LIVE_REQUIRED_LOCK = threading.Lock()
+
+
+def require_live_prices(tickers: List[str]) -> None:
+    """Make the next request for these tickers download instead of reusing a copy."""
+    now = pd.Timestamp.now(tz="UTC")
+    with _LIVE_REQUIRED_LOCK:
+        for ticker in tickers:
+            _LIVE_REQUIRED_AFTER[str(ticker).upper()] = now
+
+
+def _recent_saved_histories(
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> dict[str, pd.DataFrame] | None:
+    """Return every ticker's recently saved history, or None to download.
+
+    All tickers must have a copy saved within PRICE_SNAPSHOT_REUSE_HOURS (and
+    after the last Refresh), otherwise the whole batch downloads as usual.
+    """
+    if (
+        PRICE_SNAPSHOT_REUSE_HOURS <= 0
+        or interval != "1d"
+        or period not in REUSABLE_SNAPSHOT_PERIODS
+        or not tickers
+    ):
+        return None
+    snapshots = _load_price_snapshots_safely(tickers, period, interval)
+    if len(snapshots) < len(tickers):
+        return None
+    now = pd.Timestamp.now(tz="UTC")
+    oldest_allowed = now - pd.Timedelta(hours=PRICE_SNAPSHOT_REUSE_HOURS)
+    reused: dict[str, pd.DataFrame] = {}
+    with _LIVE_REQUIRED_LOCK:
+        required_after = dict(_LIVE_REQUIRED_AFTER)
+    for ticker in tickers:
+        frame = snapshots[ticker]
+        fetched_at = pd.to_datetime(frame.attrs.get("bac_fetched_at"), utc=True, errors="coerce")
+        if pd.isna(fetched_at) or fetched_at < oldest_allowed:
+            return None
+        refresh_mark = required_after.get(ticker.upper())
+        if refresh_mark is not None and fetched_at <= refresh_mark:
+            return None
+        # The copy was a live download a few hours ago; freshness checks still
+        # judge its newest bar like any other history.
+        frame.attrs["bac_data_status"] = "live"
+        frame.attrs["bac_reused_snapshot"] = True
+        reused[ticker] = frame
+    bac_log_kv(
+        "market_data.get_price_history_batch",
+        status="reused_recent_snapshots",
+        period=period,
+        tickers=len(reused),
+    )
+    return reused
 
 
 # Fixed-universe leaderboards are the first page after startup. Their first

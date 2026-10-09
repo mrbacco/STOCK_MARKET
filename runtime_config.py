@@ -108,6 +108,10 @@ MARKET_DATA_LICENSE_CONFIRMED = env_bool(
 # On the first leaderboard load after startup, recent last-known-good snapshots
 # are shown immediately while live prices download in the background. Snapshots
 # older than this are not used as a preview; 0 disables the preview entirely.
+# Long daily histories (one to five years) saved within this many hours are
+# reused instead of downloaded again, so restarts and new sessions skip the
+# Yahoo wait. Refresh data always downloads. 0 disables the reuse.
+PRICE_SNAPSHOT_REUSE_HOURS = max(float(os.getenv("PRICE_SNAPSHOT_REUSE_HOURS", "3")), 0.0)
 SNAPSHOT_PREVIEW_MAX_AGE_HOURS = max(
     float(os.getenv("SNAPSHOT_PREVIEW_MAX_AGE_HOURS", "12")),
     0.0,

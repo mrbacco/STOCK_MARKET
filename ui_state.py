@@ -29,7 +29,7 @@ from app_logging import bac_log_kv
 from cache_control import get_cache_generation, invalidate_market_scope, set_cache_scope
 from global_markets import reset_overview
 from walk_forward_store import load_walk_forward
-from market_data import classify_price_histories
+from market_data import classify_price_histories, require_live_prices
 from ranking_store import clear_rankings
 from market_sources import (
     DEFAULT_UNIVERSE,
@@ -213,6 +213,7 @@ def render_sidebar() -> Selection:
         set_cache_scope(cache_scope)
         if st.button("Refresh data", icon=":material/refresh:", width="stretch"):
             invalidate_market_scope(cache_scope)
+            require_live_prices(list(tickers))
             clear_rankings(str(universe_key))
             reset_overview()
             st.session_state.pop("market_analysis", None)
