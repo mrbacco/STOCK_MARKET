@@ -86,7 +86,7 @@ if selection.is_watchlist:
 
 ranking = analysis.ranking
 evidence = assess_ranking_evidence(ranking.diagnostics, walk_forward_summary(selection))
-render_evidence(evidence)
+render_evidence(evidence, compact=True)
 
 if ranking.ranking.empty:
     if ANALYTICS_READ_ONLY:

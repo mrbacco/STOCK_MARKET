@@ -121,7 +121,8 @@ class AppPagesTest(unittest.TestCase):
     def test_market_ranking_shows_evidence_before_the_ranking(self) -> None:
         app = self._open(self._app(), "app_pages/market_ranking.py")
         banners = [*app.success, *app.info, *app.warning]
-        self.assertTrue(any("edge" in banner.value or "history" in banner.value for banner in banners))
+        # The two-line caveat (or a validated-edge note) precedes the ranking.
+        self.assertTrue(any("Caution" in banner.value or "edge" in banner.value for banner in banners))
         self.assertIn("Rank IC", [metric.label for metric in app.metric])
         self.assertGreaterEqual(len(app.dataframe), 1)
 

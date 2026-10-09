@@ -31,6 +31,10 @@ from dataclasses import dataclass
 SUPPORTED_MIN_RANK_IC = 0.03
 SUPPORTED_MIN_T_STAT = 2.0
 TENTATIVE_MIN_T_STAT = 1.0
+_UNAVAILABLE_CAVEAT = (
+    "**Caution: this ranking cannot be validated yet.** There is not enough price history "
+    "to test it.  \nUse it for research only, not as buy or sell advice."
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,8 @@ class EvidenceAssessment:
     level: str
     headline: str
     detail: str
+    # Two-line caution shown above rankings; the full detail lives on Model health.
+    caveat: str = ""
 
     @property
     def show_signals(self) -> bool:
@@ -53,7 +59,43 @@ def _number(diagnostics: Mapping[str, object], key: str) -> float:
     return float(value) if isinstance(value, (int, float)) else float("nan")
 
 
-def _verdict(rank_ic: float, t_stat: float, top_excess: float, summary: str) -> EvidenceAssessment:
+def _caveat(level: str, rank_ic: float, tested_years: float | None) -> str:
+    """Two markdown lines: what the evidence shows, and how to use the ranking."""
+    period = (
+        f"Over {tested_years:.1f} years of out-of-sample testing"
+        if tested_years is not None
+        else "On the latest test window"
+    )
+    if level == "supported":
+        return (
+            f"**Validated edge.** {period} the ranking beat chance (rank IC {rank_ic:+.3f}).  \n"
+            "Past performance can fade; keep position sizes modest."
+        )
+    if level == "tentative":
+        return (
+            f"**Caution: weak evidence only.** {period} the ranking beat chance only slightly "
+            f"(rank IC {rank_ic:+.3f}).  \nTreat it as a research hint, not as buy or sell advice."
+        )
+    if tested_years is None:
+        return (
+            "**Caution: this ranking is unproven.** It has not beaten chance on recent data, and "
+            "no multi-year test has been run yet.  \nUse it for research only; run the multi-year "
+            "test on the Model health page."
+        )
+    return (
+        f"**Caution: this ranking is unproven.** {period} it did not beat chance "
+        f"(rank IC {rank_ic:+.3f}).  \nUse it for research only, not as buy or sell advice; "
+        "details are on the Model health page."
+    )
+
+
+def _verdict(
+    rank_ic: float,
+    t_stat: float,
+    top_excess: float,
+    summary: str,
+    tested_years: float | None = None,
+) -> EvidenceAssessment:
     if (
         rank_ic >= SUPPORTED_MIN_RANK_IC
         and not math.isnan(t_stat)
@@ -61,13 +103,17 @@ def _verdict(rank_ic: float, t_stat: float, top_excess: float, summary: str) -> 
         and top_excess > 0
     ):
         return EvidenceAssessment(
-            "supported", "The ranking has a validated edge in this universe", summary
+            "supported",
+            "The ranking has a validated edge in this universe",
+            summary,
+            _caveat("supported", rank_ic, tested_years),
         )
     if rank_ic > 0 and not math.isnan(t_stat) and t_stat >= TENTATIVE_MIN_T_STAT:
         return EvidenceAssessment(
             "tentative",
             "Some evidence of an edge, not yet conclusive",
             summary + " Treat the ordering as a weak hint, not a signal.",
+            _caveat("tentative", rank_ic, tested_years),
         )
     return EvidenceAssessment(
         "none",
@@ -75,6 +121,7 @@ def _verdict(rank_ic: float, t_stat: float, top_excess: float, summary: str) -> 
         summary
         + " The model's ordering has not beaten chance here, so no buy or avoid"
         " signals are shown.",
+        _caveat("none", rank_ic, tested_years),
     )
 
 
@@ -86,6 +133,7 @@ def assess_walk_forward_evidence(summary: Mapping[str, object]) -> EvidenceAsses
             "unavailable",
             "The walk-forward test produced no predictions",
             "Try a universe with longer price history.",
+            _UNAVAILABLE_CAVEAT,
         )
     t_stat = _number(summary, "Rank IC t-stat")
     net_excess = _number(summary, "Portfolio Cumulative net excess")
@@ -97,7 +145,7 @@ def assess_walk_forward_evidence(summary: Mapping[str, object]) -> EvidenceAsses
         f"{int(_number(summary, 'Top-N'))} picks returned {net_excess:+.1f}% versus the "
         f"universe after costs. A simple 5-day reversal rule scored rank IC {reversal:+.3f}."
     )
-    return _verdict(rank_ic, t_stat, net_excess, text)
+    return _verdict(rank_ic, t_stat, net_excess, text, _number(summary, "Test years"))
 
 
 def assess_ranking_evidence(
@@ -118,6 +166,7 @@ def assess_ranking_evidence(
             "unavailable",
             "Not enough history to validate the ranking",
             "The model needs more price history before its ranking can be tested.",
+            _UNAVAILABLE_CAVEAT,
         )
 
     summary = (

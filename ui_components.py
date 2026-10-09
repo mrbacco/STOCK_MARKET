@@ -107,16 +107,24 @@ def render_data_health(health: PriceDataHealth, price_data: dict[str, pd.DataFra
         )
 
 
-def render_evidence(evidence: EvidenceAssessment) -> None:
-    """Show how far the ranking can be trusted, before the ranking itself."""
-    if evidence.level == "supported":
-        st.success(f"**{evidence.headline}.** {evidence.detail}", icon=":material/verified:")
-    elif evidence.level == "tentative":
-        st.info(f"**{evidence.headline}.** {evidence.detail}", icon=":material/info:")
-    elif evidence.level == "none":
-        st.warning(f"**{evidence.headline}.** {evidence.detail}", icon=":material/report:")
+def render_evidence(evidence: EvidenceAssessment, *, compact: bool = False) -> None:
+    """Show how far the ranking can be trusted, before the ranking itself.
+
+    The compact form is the two-line caveat used above rankings; the full form,
+    with every supporting number, is used on the Model health page.
+    """
+    if compact and evidence.caveat:
+        text = evidence.caveat
     else:
-        st.info(f"**{evidence.headline}.** {evidence.detail}", icon=":material/hourglass:")
+        text = f"**{evidence.headline}.** {evidence.detail}"
+    if evidence.level == "supported":
+        st.success(text, icon=":material/verified:")
+    elif evidence.level == "tentative":
+        st.info(text, icon=":material/info:")
+    elif evidence.level == "none":
+        st.warning(text, icon=":material/report:")
+    else:
+        st.info(text, icon=":material/hourglass:")
 
 
 def ranking_column_config() -> dict[str, Any]:

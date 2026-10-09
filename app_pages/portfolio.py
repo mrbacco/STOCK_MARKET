@@ -36,7 +36,10 @@ if analysis is None or analysis.ranking.evaluation.empty:
             icon=":material/hourglass:")
     st.stop()
 
-render_evidence(assess_ranking_evidence(analysis.ranking.diagnostics, walk_forward_summary(selection)))
+render_evidence(
+    assess_ranking_evidence(analysis.ranking.diagnostics, walk_forward_summary(selection)),
+    compact=True,
+)
 
 universe_size = int(np.asarray(analysis.ranking.evaluation.groupby("Date")["Ticker"].nunique()).min())
 with st.container(horizontal=True):
