@@ -28,7 +28,13 @@ from ui_components import (
     render_forecast_caption,
     render_forecast_status,
 )
-from ui_state import HOLDING_PERIODS, current_selection, market_analysis, walk_forward_summary
+from ui_state import (
+    HOLDING_PERIODS,
+    current_selection,
+    market_analysis,
+    track_record,
+    walk_forward_summary,
+)
 
 # Six months keeps a one-month forecast cone readable next to the history.
 CHART_SESSIONS = 126
@@ -111,7 +117,7 @@ ranking_row = (
 )
 with st.container(border=True):
     if ranking_row.empty:
-        st.markdown(f"**What the model says, {period_label} view**")
+        st.markdown(f"**Prediction, next {period_label}**")
         st.caption(
             "The model ranks a whole market at a time. Open Today for this stock's market "
             "to see where it stands."
@@ -122,11 +128,33 @@ with st.container(border=True):
         evidence = assess_walk_forward_evidence(tested) if tested else None
         level = evidence.level if evidence is not None else "untested"
         badge = EVIDENCE_BADGES.get(level, "")
-        st.markdown(f"**What the model says, {period_label} view** &nbsp; {badge}")
+        st.markdown(f"**Prediction, next {period_label}** &nbsp; {badge}")
+        rank, size = int(row["Rank"]), len(ranking_frame)
+        quarter = max(size // 4, 1)
+        market_name = selection.label.split(" - ")[-1]
+        record = track_record(selection)
+        if rank <= quarter:
+            sentence = f"{company} should **beat** the {market_name}."
+            share = record.get("Top quarter right %")
+            group = "top quarter"
+        elif rank > size - quarter:
+            sentence = f"{company} should **lag** the {market_name}."
+            share = record.get("Bottom quarter right %")
+            group = "bottom quarter"
+        else:
+            sentence = f"{company} should move roughly **in line with** the {market_name}."
+            share, group = None, ""
+        st.markdown(f"##### {sentence}")
+        if share is not None:
+            st.markdown(
+                f":material/history: In testing, stocks the model put in the {group} of this "
+                f"market did as called **{share:.0f}%** of the time. One stock is a close call; "
+                "a basket of the top picks is more reliable (see Today)."
+            )
         with st.container(horizontal=True):
             st.metric("Rank in this market", f"{int(row['Rank'])} of {len(ranking_frame)}", border=True)
             st.metric(
-                "Expected vs the market",
+                "Prediction vs the market",
                 f"{float(row['Expected excess return']):+.1f}%",
                 border=True,
                 help="Predicted return minus the average stock in this market.",

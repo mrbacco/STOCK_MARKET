@@ -334,10 +334,47 @@ def walk_forward_summary(selection: Selection) -> dict | None:
     return stored.summary if stored is not None and stored.is_current else None
 
 
-def markets_with_evidence(horizon: int) -> list[tuple[str, float]]:
-    """Universes whose current model shows at least tentative tested evidence.
+_track_records: dict[tuple[str, int, str], dict] = {}
+# Today speaks only where the top-3 basket beat the market in at least this
+# share of test months; below it the calls are close to a coin flip.
+MIN_BASKET_HIT_RATE = 0.55
 
-    Returns (universe key, rank IC) pairs, strongest first.
+
+def basket_hit_rate(record: dict) -> float:
+    """Share of test months in which the top basket beat the market, or 0."""
+    periods = int(record.get("Periods", 0) or 0)
+    return float(record.get("Basket right", 0)) / periods if periods else 0.0
+
+
+def track_record(selection: Selection) -> dict:
+    """How often the current model's calls came true in its multi-year test.
+
+    Empty when the market has no test of the current model. The result is
+    kept per stored run, so the predictions are decoded once.
+    """
+    if selection.is_watchlist:
+        return {}
+    return _market_track_record(selection.universe_key, selection.horizon)
+
+
+def _market_track_record(universe_key: str, horizon: int) -> dict:
+    stored = load_walk_forward(universe_key, horizon, with_predictions=False)
+    if stored is None or not stored.is_current:
+        return {}
+    key = (universe_key, horizon, stored.created_at)
+    if key not in _track_records:
+        from walk_forward import call_track_record
+
+        full = load_walk_forward(universe_key, horizon)
+        _track_records[key] = call_track_record(full.predictions, horizon=horizon) if full else {}
+    return _track_records[key]
+
+
+def markets_with_evidence(horizon: int) -> list[tuple[str, float]]:
+    """Universes where Today shows predictions: tested evidence and a basket
+    that beat the market often enough.
+
+    Returns (universe key, basket hit rate) pairs, most reliable first.
     """
     from model_evidence import assess_walk_forward_evidence
 
@@ -346,8 +383,11 @@ def markets_with_evidence(horizon: int) -> list[tuple[str, float]]:
         stored = load_walk_forward(key, horizon, with_predictions=False)
         if stored is None or not stored.is_current:
             continue
-        if assess_walk_forward_evidence(stored.summary).level in ("supported", "tentative"):
-            found.append((key, float(stored.summary.get("Rank IC", 0.0))))
+        if assess_walk_forward_evidence(stored.summary).level not in ("supported", "tentative"):
+            continue
+        hit_rate = basket_hit_rate(_market_track_record(key, horizon))
+        if hit_rate >= MIN_BASKET_HIT_RATE:
+            found.append((key, hit_rate))
     return sorted(found, key=lambda item: item[1], reverse=True)
 
 

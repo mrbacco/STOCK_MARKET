@@ -244,3 +244,50 @@ def summarize_walk_forward(
             else float("nan")
         ),
     }
+
+
+def call_track_record(
+    predictions: pd.DataFrame,
+    *,
+    horizon: int,
+    basket_size: int = 3,
+) -> dict[str, float | int]:
+    """How often the model's plain-language calls came true in the test.
+
+    Uses every `horizon`-th test date, so each call's outcome is independent of
+    the next one. A call is right when the stock (or the basket's average)
+    returned more than the market over the horizon; for the bottom quarter the
+    call is "lags the market", right when it returned less.
+    """
+    labeled = predictions.dropna(subset=["predicted_excess_return", "target_excess_log_return"])
+    dates = sorted(labeled["Date"].unique())[:: max(int(horizon), 1)]
+    top_hits = basket_hits = periods = 0
+    basket_excess: list[float] = []
+    top_quarter: list[bool] = []
+    bottom_quarter: list[bool] = []
+    for date in dates:
+        day = labeled.loc[labeled["Date"] == date].sort_values(
+            "predicted_excess_return", ascending=False
+        )
+        outcome = np.asarray(day["target_excess_log_return"], dtype=float)
+        if outcome.size < max(4, basket_size + 1):
+            continue
+        quarter = max(outcome.size // 4, 1)
+        periods += 1
+        top_hits += int(outcome[0] > 0)
+        basket = float(outcome[:basket_size].mean())
+        basket_hits += int(basket > 0)
+        basket_excess.append(basket)
+        top_quarter.extend(bool(value > 0) for value in outcome[:quarter])
+        bottom_quarter.extend(bool(value < 0) for value in outcome[-quarter:])
+    if periods == 0:
+        return {}
+    return {
+        "Periods": periods,
+        "Top pick right": top_hits,
+        "Basket right": basket_hits,
+        "Basket size": int(basket_size),
+        "Basket mean excess": float(np.mean(basket_excess) * 100.0),
+        "Top quarter right %": float(np.mean(top_quarter) * 100.0),
+        "Bottom quarter right %": float(np.mean(bottom_quarter) * 100.0),
+    }

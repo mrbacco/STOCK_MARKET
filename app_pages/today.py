@@ -8,18 +8,23 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
+from call_tracker import BEATS, LAGS, Call, check_calls, live_record, record_calls
 from ideas import Idea, market_mood, pick_ideas
 from market_sources import universe_label
 from model_evidence import assess_walk_forward_evidence
 from runtime_config import ANALYTICS_READ_ONLY
 from ui_state import (
     HOLDING_PERIODS,
+    MIN_BASKET_HIT_RATE,
+    basket_hit_rate,
     current_selection,
     market_analysis,
     markets_with_evidence,
     open_stock,
+    track_record,
     walk_forward_summary,
 )
 
@@ -103,15 +108,26 @@ if ranking.ranking.empty:
     )
     st.stop()
 
-# Ideas need the multi-year test; the 30-date window alone is too short to trust.
+# Predictions need the multi-year test, and a top-3 basket that beat the
+# market often enough there; the 30-date window alone is too short to trust.
 tested = walk_forward_summary(selection)
 evidence = assess_walk_forward_evidence(tested) if tested else None
+record = track_record(selection)
+hit_rate = basket_hit_rate(record)
 if evidence is None or evidence.level not in ("supported", "tentative"):
     reason = (
         "The current model has not been tested on this market yet."
         if evidence is None
         else "In years of testing, the model's picks here did no better than chance."
     )
+elif hit_rate < MIN_BASKET_HIT_RATE:
+    reason = (
+        f"In testing, its top 3 beat the market in only {int(record.get('Basket right', 0))} "
+        f"of {int(record.get('Periods', 0))} months, close to a coin flip."
+    )
+else:
+    reason = ""
+if reason:
     st.warning(
         f"**No reliable ideas in {selection.label} for a {period} hold.** {reason} "
         "Rather than show a guess, this page stays quiet.",
@@ -121,14 +137,54 @@ if evidence is None or evidence.level not in ("supported", "tentative"):
     st.stop()
 
 best, worst = pick_ideas(ranking.ranking, prices, selection.companies)
+market_name = selection.label.split(" - ")[-1]
 badge = (
     ":green-badge[:material/verified: Tested edge]"
-    if evidence.level == "supported"
+    if evidence is not None and evidence.level == "supported"
     else ":orange-badge[:material/science: Early evidence, not proven]"
 )
-st.markdown(f"#### Stocks to look at, {period} view &nbsp; {badge}")
-if not best:
-    st.info("The model expects no stock here to beat the market right now.", icon=":material/info:")
+
+# Every call shown here is saved and checked against the market once its
+# holding period is over, so the page can show a live record next to the test.
+as_of = pd.Timestamp(max(pd.to_datetime(frame["Date"]).max() for frame in prices.values()))
+check_calls(selection.universe_key, selection.horizon, prices)
+record_calls(
+    selection.universe_key,
+    selection.horizon,
+    as_of,
+    [Call(idea.ticker, BEATS, idea.expected_excess) for idea in best]
+    + [Call(idea.ticker, LAGS, idea.expected_excess) for idea in worst],
+)
+live = live_record(selection.universe_key, selection.horizon)
+
+st.markdown(f"#### Prediction for the next {period} &nbsp; {badge}")
+with st.container(border=True):
+    if best:
+        names = ", ".join(f"**{idea.company}**" for idea in best[:-1])
+        names = f"{names} and **{best[-1].company}**" if names else f"**{best[-1].company}**"
+        st.markdown(f"##### {names} should beat the {market_name}.")
+    else:
+        st.markdown(f"##### No stock in the {market_name} is expected to beat it right now.")
+    if record:
+        periods = int(record["Periods"])
+        st.markdown(
+            f":material/history: **Track record in testing:** the model's top "
+            f"{int(record['Basket size'])} beat the market in **{int(record['Basket right'])} of "
+            f"{periods} months** ({100 * record['Basket right'] / periods:.0f}%), by "
+            f"{record['Basket mean excess']:+.1f}% on average. Its #1 pick did in "
+            f"{int(record['Top pick right'])} of {periods}."
+        )
+    if live.checked:
+        st.markdown(
+            f":material/fact_check: **Live record:** {live.right} of {live.checked} calls "
+            f"checked so far came true."
+        )
+    elif live.next_check_after is not None:
+        first_result = live.next_check_after + pd.offsets.BDay(selection.horizon)
+        st.markdown(
+            f":material/fact_check: **Live record:** {live.made} calls saved; the first are "
+            f"checked around {first_result:%d %b %Y}."
+        )
 
 
 def render_idea(idea: Idea) -> None:
@@ -137,7 +193,7 @@ def render_idea(idea: Idea) -> None:
             f"**{idea.company}** &nbsp; :gray[{idea.ticker}] &nbsp; {RISK_BADGES[idea.risk]}"
         )
         st.metric(
-            f"Expected vs the market, {period}",
+            f"Prediction vs the market, {period}",
             f"{idea.expected_excess:+.1f}%",
             help="Predicted return minus the average stock in this market.",
         )
@@ -157,16 +213,10 @@ if worst:
     names = ", ".join(
         f"**{idea.company}** ({idea.expected_excess:+.1f}%)" for idea in worst
     )
-    st.markdown(
-        f":material/front_hand: **Be careful with:** {names}. "
-        "The model expects these to lag the market."
-    )
+    st.markdown(f":material/front_hand: **Should lag the market:** {names}.")
 
-tested_years = float(tested.get("Test years", 0.0)) if tested else 0.0
 st.caption(
-    f"The likely range covers 8 outcomes in 10. The model's picks beat chance over "
-    f"{tested_years:.0f} years of testing, "
-    + ("convincingly. " if evidence.level == "supported" else "but only slightly. ")
-    + "Spread your money across several ideas and keep each one small. "
-    "The full ranking is under Advanced."
+    "A prediction here means beating or lagging the average stock in this market over the "
+    "holding period, not a guaranteed price. The likely range covers 8 outcomes in 10. "
+    "Spread your money across several ideas and keep each one small."
 )

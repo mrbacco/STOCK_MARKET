@@ -21,6 +21,7 @@ from streamlit.testing.v1 import AppTest
 
 import chart_pipeline
 import global_markets
+import call_tracker
 import market_data
 import ranking_store
 import sentiment_service
@@ -73,6 +74,7 @@ class AppPagesTest(unittest.TestCase):
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.patchers = [
             patch.object(ranking_store, "DEFAULT_RANKING_DB", Path(cls.temp_dir.name) / "rankings.db"),
+            patch.object(call_tracker, "DEFAULT_CALLS_DB", Path(cls.temp_dir.name) / "calls.db"),
             patch.object(market_data, "get_price_history_batch", side_effect=_price_batch),
             patch.object(global_markets, "get_price_history_batch", side_effect=_price_batch),
             patch.object(chart_pipeline, "get_price_history_batch", side_effect=_price_batch),
@@ -130,12 +132,39 @@ class AppPagesTest(unittest.TestCase):
             "Portfolio Cumulative net excess": 40.0, "Top-N": 10, "Test years": 3.0,
             "Reversal rank IC": 0.0, "Model features": "base+factors+ranks",
         }
-        with patch("ui_state.walk_forward_summary", return_value=summary):
+        record = {
+            "Periods": 36, "Top pick right": 20, "Basket right": 22, "Basket size": 3,
+            "Basket mean excess": 1.2, "Top quarter right %": 56.0, "Bottom quarter right %": 54.0,
+        }
+        with (
+            patch("ui_state.walk_forward_summary", return_value=summary),
+            patch("ui_state.track_record", return_value=record),
+        ):
             app = self._app()
         self.assertEqual([], [error.value for error in app.exception])
         markdown = " ".join(block.value for block in app.markdown)
-        self.assertIn("Stocks to look at", markdown)
+        self.assertIn("Prediction for the next", markdown)
+        self.assertIn("should beat the FTSE MIB", markdown)
+        self.assertIn("22 of 36 months", markdown)
         self.assertIn("Early evidence", markdown)
+
+    def test_today_stays_quiet_when_the_basket_is_a_coin_flip(self) -> None:
+        summary = {
+            "Rank IC": 0.06, "Rank IC t-stat": 1.6, "Positive quarters": 70.0,
+            "Portfolio Cumulative net excess": 40.0, "Top-N": 10, "Test years": 3.0,
+            "Reversal rank IC": 0.0, "Model features": "base+factors+ranks",
+        }
+        record = {"Periods": 36, "Top pick right": 17, "Basket right": 18, "Basket size": 3}
+        with (
+            patch("ui_state.walk_forward_summary", return_value=summary),
+            patch("ui_state.track_record", return_value=record),
+            patch("ui_state.markets_with_evidence", return_value=[]),
+        ):
+            app = self._app()
+        self.assertEqual([], [error.value for error in app.exception])
+        warnings = " ".join(banner.value for banner in app.warning)
+        self.assertIn("18 of 36 months", warnings)
+        self.assertNotIn("See details", [button.label for button in app.button])
 
     def test_global_markets_page_renders(self) -> None:
         app = self._open(self._app(), "app_pages/world_markets.py")
@@ -164,7 +193,7 @@ class AppPagesTest(unittest.TestCase):
         self._open(app, "app_pages/stock.py")
         labels = [metric.label for metric in app.metric]
         self.assertIn("Last close", labels)
-        self.assertIn("Expected vs the market", labels)
+        self.assertIn("Prediction vs the market", labels)
         # The single-stock projection is computed only when asked for.
         self.assertEqual(0, len(app.get("plotly_chart")))
         app.toggle(key="stock_projection").set_value(True).run()
