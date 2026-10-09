@@ -37,8 +37,12 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
   turnover.
 - **News & sentiment page:** 24-hour and 7-day sentiment for every stock in the universe and the
   latest headlines.
-- **Model health page:** validation metrics, ensemble weights, live scoring of recorded
-  projections, and drift across model runs.
+- **Model health page:** a multi-year walk-forward test, validation metrics, ensemble weights,
+  live scoring of recorded projections, and drift across model runs.
+- **Multi-year walk-forward test:** replays the production ensemble over five years, retraining
+  every quarter on data available at the time, and reports rank IC with a non-overlapping
+  t-statistic, quarterly stability, a top-N backtest after costs, and comparisons with simple
+  momentum and reversal rules. When it exists, it drives the evidence verdict.
 - A pooled Ridge, Elastic Net, and histogram-gradient-boosting ensemble with market context,
   relative strength, beta, breadth, volatility, liquidity, and point-in-time sentiment features,
   plus an optional LightGBM LambdaRank member that joins only when it improves tuning rank IC.
@@ -73,6 +77,8 @@ A Streamlit dashboard for monitoring public stock market data, market news, sent
 - market_sources.py: Universe registry (calendar, currency, description) and ticker lookups.
 - global_markets.py: Cross-asset and universe snapshots, and the background overview loader.
 - model_evidence.py: Out-of-sample evidence verdict that gates ranking signals.
+- walk_forward.py, walk_forward_store.py: Multi-year rolling walk-forward test, its background
+  runner, and result storage.
 - portfolio_backtest.py: Non-overlapping top-N strategy backtest with trading costs.
 - app_config.py: Shared modelling constants and exchange-calendar mappings.
 - app_logging.py: BAC_LOG helpers on top of the standard logging module (`LOG_LEVEL`).
@@ -212,6 +218,13 @@ horizons of one to five exchange sessions.
 - It is directional, not predictive in a guaranteed sense.
 - It works best as a short-horizon market context tool.
 - It should not be used as a sole decision engine for investing.
+
+The most reliable verdict comes from the multi-year walk-forward test on the Model health page.
+Every quarter of the last five years, the ensemble is rebuilt exactly as in production, using
+only data whose outcomes were known at the time (with a forecast-horizon gap), and it predicts
+the following quarter. Rank IC significance is measured on non-overlapping dates, and the model
+is compared with simple 20-day momentum and 5-day reversal rules. The design follows FinRL's
+rolling-window retraining.
 
 The ranking is judged mainly by rank IC: for each evaluation date, the rank correlation between
 the predicted and the realized order of stocks, averaged over dates. Values persistently above 0

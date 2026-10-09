@@ -22,7 +22,7 @@ from ui_components import (
     render_validation_strip,
     selectable_table,
 )
-from ui_state import current_selection, leaderboard_frame, market_analysis
+from ui_state import current_selection, leaderboard_frame, market_analysis, walk_forward_summary
 
 selection = current_selection()
 price_prefix, price_format, _axis = selection.price_display()
@@ -85,7 +85,7 @@ if selection.is_watchlist:
     st.stop()
 
 ranking = analysis.ranking
-evidence = assess_ranking_evidence(ranking.diagnostics)
+evidence = assess_ranking_evidence(ranking.diagnostics, walk_forward_summary(selection))
 render_evidence(evidence)
 
 if ranking.ranking.empty:

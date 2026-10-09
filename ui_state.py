@@ -26,6 +26,7 @@ import streamlit as st
 from app_logging import bac_log_kv
 from cache_control import get_cache_generation, invalidate_market_scope, set_cache_scope
 from global_markets import reset_overview
+from walk_forward_store import load_walk_forward
 from market_data import classify_price_histories
 from market_sources import (
     DEFAULT_UNIVERSE,
@@ -269,6 +270,14 @@ def market_analysis(selection: Selection, *, compute: bool = True) -> MarketAnal
     analysis = MarketAnalysis(prices, health, ranking, resolved)
     st.session_state["market_analysis"] = (key, analysis)
     return analysis
+
+
+def walk_forward_summary(selection: Selection) -> dict | None:
+    """Return the stored multi-year walk-forward summary for this selection."""
+    if selection.is_watchlist:
+        return None
+    stored = load_walk_forward(selection.universe_key, selection.horizon, with_predictions=False)
+    return stored.summary if stored is not None else None
 
 
 def open_stock(ticker: str) -> None:

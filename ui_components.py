@@ -23,6 +23,7 @@ from ui_state import open_stock
 
 if TYPE_CHECKING:
     from chart_pipeline import TickerForecast
+    from walk_forward_store import StoredWalkForward
 
 PERCENT = "%+.2f%%"
 
@@ -349,3 +350,114 @@ def render_model_monitoring(monitoring_market: str, horizon: int, price_format: 
         ),
         hide_index=True,
     )
+
+
+def render_walk_forward(stored: StoredWalkForward, horizon: int) -> None:
+    """Show a stored multi-year walk-forward result."""
+    from portfolio_backtest import top_n_backtest
+
+    summary = stored.summary
+    tested = pd.Timestamp(stored.created_at).strftime("%Y-%m-%d %H:%M UTC")
+    st.caption(
+        f"Tested {tested} on {summary.get('Test start')} to {summary.get('Test end')} "
+        f"({summary.get('Test years')} years, {summary.get('Test dates')} test dates, "
+        f"{summary.get('Retraining points')} retraining points)."
+    )
+    with st.container(horizontal=True):
+        st.metric("Rank IC", f"{diagnostic_value(summary, 'Rank IC'):+.3f}", border=True)
+        st.metric(
+            "t-statistic",
+            f"{diagnostic_value(summary, 'Rank IC t-stat'):.1f}",
+            border=True,
+            help="On non-overlapping dates. Above 2 is the usual significance bar.",
+        )
+        st.metric(
+            "Positive quarters",
+            f"{diagnostic_value(summary, 'Positive quarters'):.0f}%",
+            border=True,
+        )
+        st.metric(
+            f"Top-{int(diagnostic_value(summary, 'Top-N'))} net excess",
+            f"{diagnostic_value(summary, 'Portfolio Cumulative net excess'):+.1f}%",
+            border=True,
+            help="Compounded return versus the universe after trading costs.",
+        )
+        st.metric(
+            "Information ratio",
+            f"{diagnostic_value(summary, 'Portfolio Information ratio'):.2f}",
+            border=True,
+        )
+
+    st.markdown("**Model versus simple rules** (average daily rank IC)")
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Ranking": ["Pooled model", "20-day momentum", "5-day reversal"],
+                "Rank IC": [
+                    diagnostic_value(summary, "Rank IC"),
+                    diagnostic_value(summary, "Momentum rank IC"),
+                    diagnostic_value(summary, "Reversal rank IC"),
+                ],
+            }
+        ),
+        column_config={"Rank IC": st.column_config.NumberColumn(format="%+.3f")},
+        hide_index=True,
+    )
+
+    quarterly = summary.get("Quarterly rank IC", {})
+    chart_column, curve_column = st.columns(2)
+    if isinstance(quarterly, dict) and quarterly:
+        with chart_column:
+            st.markdown("**Rank IC by quarter**")
+            values = [float(value) for value in quarterly.values()]
+            figure = go.Figure(
+                go.Bar(
+                    x=list(quarterly),
+                    y=values,
+                    marker_color=["#2e7d32" if value > 0 else "#c62828" for value in values],
+                )
+            )
+            figure.update_layout(
+                template="plotly_white", height=300, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                yaxis_title="Rank IC",
+            )
+            st.plotly_chart(figure, key="walk_forward_quarters")
+    if not stored.predictions.empty:
+        backtest = top_n_backtest(
+            stored.predictions,
+            horizon=horizon,
+            top_n=int(diagnostic_value(summary, "Top-N")),
+            cost_bps=diagnostic_value(summary, "Cost bps"),
+        )
+        if not backtest.periods.empty:
+            with curve_column:
+                st.markdown("**Cumulative excess return**")
+                figure = go.Figure()
+                for column, name, dash in (
+                    ("Cumulative net", "Top-N after costs", "solid"),
+                    ("Cumulative gross", "Top-N before costs", "dot"),
+                    ("Cumulative bottom-N", "Bottom-N (control)", "dash"),
+                ):
+                    figure.add_trace(
+                        go.Scatter(
+                            x=backtest.periods["Date"],
+                            y=backtest.periods[column] * 100,
+                            name=name,
+                            mode="lines",
+                            line={"dash": dash},
+                        )
+                    )
+                figure.add_hline(y=0, line_color="gray", line_width=1)
+                figure.update_layout(
+                    template="plotly_white", height=300,
+                    margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                    yaxis_title="%", legend={"orientation": "h", "y": 1.15},
+                )
+                st.plotly_chart(figure, key="walk_forward_curve")
+
+    if not stored.folds.empty:
+        with st.expander("Retraining log"):
+            st.dataframe(
+                stored.folds.assign(Weights=stored.folds["Weights"].astype(str)),
+                hide_index=True,
+            )

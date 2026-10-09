@@ -15,7 +15,7 @@ import streamlit as st
 from model_evidence import assess_ranking_evidence
 from portfolio_backtest import top_n_backtest
 from ui_components import render_evidence
-from ui_state import current_selection, market_analysis
+from ui_state import current_selection, market_analysis, walk_forward_summary
 
 selection = current_selection()
 st.subheader(f"Top-N strategy - {selection.label}")
@@ -36,7 +36,7 @@ if analysis is None or analysis.ranking.evaluation.empty:
             icon=":material/hourglass:")
     st.stop()
 
-render_evidence(assess_ranking_evidence(analysis.ranking.diagnostics))
+render_evidence(assess_ranking_evidence(analysis.ranking.diagnostics, walk_forward_summary(selection)))
 
 universe_size = int(np.asarray(analysis.ranking.evaluation.groupby("Date")["Ticker"].nunique()).min())
 with st.container(horizontal=True):

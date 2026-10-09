@@ -19,6 +19,7 @@ weights.  Forecast-horizon gaps prevent labels from crossing a split boundary.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import cast
 
 import numpy as np
@@ -602,6 +603,96 @@ def _empty_ranking_result() -> dict[str, object]:
     return {"ranking": pd.DataFrame(), "evaluation": pd.DataFrame(), "diagnostics": {}}
 
 
+@dataclass(frozen=True)
+class EnsembleSelection:
+    """Members, weights, and ranker decision learned on a tuning period."""
+
+    use_ranker: bool
+    weights: dict[str, float]
+    tuning_mae: dict[str, float]
+    tuning_predictions: dict[str, np.ndarray]
+    tuning_rank_ic_with: float
+    tuning_rank_ic_without: float
+
+    @property
+    def ranker_status(self) -> str:
+        if self.use_ranker:
+            return "included"
+        if np.isfinite(self.tuning_rank_ic_with):
+            return "not helpful on tuning period"
+        return "unavailable"
+
+
+def select_ensemble(
+    base_frame: pd.DataFrame,
+    tuning_frame: pd.DataFrame,
+    forecast_horizon: int,
+) -> EnsembleSelection:
+    """Fit members on the base period and choose weights on the tuning period.
+
+    The ranker joins only if the tuning period's rank IC is positive with it
+    and better than without it. Production ranking and the walk-forward test
+    both call this, so they evaluate exactly the same selection rule.
+    """
+    tuning_target = pd.Series(tuning_frame["target_excess_log_return"])
+    tuning_predictions, _ = _fit_predict_regressors(
+        base_frame,
+        tuning_frame,
+        include_ranker=True,
+        forecast_horizon=forecast_horizon,
+    )
+    without_ranker = {
+        name: values for name, values in tuning_predictions.items() if name != RANKER_MODEL
+    }
+    rank_ic_without, _ = mean_rank_ic(
+        tuning_frame["Date"],
+        _weighted_prediction(without_ranker, _ensemble_weights(tuning_target, without_ranker)[0]),
+        tuning_target,
+    )
+    rank_ic_with = float("nan")
+    if RANKER_MODEL in tuning_predictions:
+        rank_ic_with, _ = mean_rank_ic(
+            tuning_frame["Date"],
+            _weighted_prediction(
+                tuning_predictions,
+                _ensemble_weights(tuning_target, tuning_predictions)[0],
+            ),
+            tuning_target,
+        )
+    use_ranker = bool(
+        RANKER_MODEL in tuning_predictions
+        and np.isfinite(rank_ic_with)
+        and rank_ic_with > 0
+        and (not np.isfinite(rank_ic_without) or rank_ic_with > rank_ic_without)
+    )
+    chosen = tuning_predictions if use_ranker else without_ranker
+    weights, tuning_mae = _ensemble_weights(tuning_target, chosen)
+    return EnsembleSelection(
+        use_ranker=use_ranker,
+        weights=weights,
+        tuning_mae=tuning_mae,
+        tuning_predictions=chosen,
+        tuning_rank_ic_with=rank_ic_with,
+        tuning_rank_ic_without=rank_ic_without,
+    )
+
+
+def blend_predictions(
+    training_frame: pd.DataFrame,
+    prediction_frame: pd.DataFrame,
+    selection: EnsembleSelection,
+    forecast_horizon: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Refit the selected members and return the weighted blend and components."""
+    predictions, _ = _fit_predict_regressors(
+        training_frame,
+        prediction_frame,
+        include_ranker=selection.use_ranker,
+        forecast_horizon=forecast_horizon,
+    )
+    return _weighted_prediction(predictions, selection.weights), predictions
+
+
 def _fit_probability_pipeline(
     base_frame: pd.DataFrame,
     tuning_frame: pd.DataFrame,
@@ -740,56 +831,16 @@ def rank_market_candidates(
     pre_evaluation_frame = by_dates(split["pre_evaluation"])
     evaluation_frame = by_dates(split["evaluation"])
 
-    tuning_target = pd.Series(tuning_frame["target_excess_log_return"])
-    tuning_predictions, _ = _fit_predict_regressors(
-        base_frame,
-        tuning_frame,
-        include_ranker=True,
-        forecast_horizon=forecast_horizon,
-    )
-
-    # The ranker joins the ensemble only if the tuning period's rank IC is
-    # positive with it and better than without it. Deciding on tuning data
-    # keeps the evaluation period untouched.
-    without_ranker = {
-        name: values for name, values in tuning_predictions.items() if name != RANKER_MODEL
-    }
-    tuning_rank_ic_without, _ = mean_rank_ic(
-        tuning_frame["Date"],
-        _weighted_prediction(without_ranker, _ensemble_weights(tuning_target, without_ranker)[0]),
-        tuning_target,
-    )
-    tuning_rank_ic_with = float("nan")
-    if RANKER_MODEL in tuning_predictions:
-        tuning_rank_ic_with, _ = mean_rank_ic(
-            tuning_frame["Date"],
-            _weighted_prediction(
-                tuning_predictions,
-                _ensemble_weights(tuning_target, tuning_predictions)[0],
-            ),
-            tuning_target,
-        )
-    use_ranker = bool(
-        RANKER_MODEL in tuning_predictions
-        and np.isfinite(tuning_rank_ic_with)
-        and tuning_rank_ic_with > 0
-        and (
-            not np.isfinite(tuning_rank_ic_without)
-            or tuning_rank_ic_with > tuning_rank_ic_without
-        )
-    )
-    if not use_ranker:
-        tuning_predictions = without_ranker
-    ranker_status = (
-        "included"
-        if use_ranker
-        else "not helpful on tuning period"
-        if np.isfinite(tuning_rank_ic_with)
-        else "unavailable"
-    )
-    weights, tuning_mae = _ensemble_weights(tuning_target, tuning_predictions)
-    if not weights:
+    selection = select_ensemble(base_frame, tuning_frame, forecast_horizon)
+    if not selection.weights:
         return _empty_ranking_result()
+    tuning_target = pd.Series(tuning_frame["target_excess_log_return"])
+    tuning_predictions = selection.tuning_predictions
+    weights, tuning_mae = selection.weights, selection.tuning_mae
+    use_ranker = selection.use_ranker
+    ranker_status = selection.ranker_status
+    tuning_rank_ic_with = selection.tuning_rank_ic_with
+    tuning_rank_ic_without = selection.tuning_rank_ic_without
 
     # Final metrics come from a later untouched block, with a horizon-length gap
     # between its first origin and the preceding training origins.

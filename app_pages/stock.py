@@ -26,7 +26,7 @@ from ui_components import (
     render_forecast_caption,
     render_forecast_status,
 )
-from ui_state import current_selection, market_analysis
+from ui_state import current_selection, market_analysis, walk_forward_summary
 
 selection = current_selection()
 analysis = market_analysis(selection, compute=False)
@@ -130,7 +130,9 @@ with st.container(border=True):
         )
     else:
         row = ranking_row.iloc[0]
-        evidence = assess_ranking_evidence(analysis.ranking.diagnostics if analysis else {})
+        evidence = assess_ranking_evidence(
+            analysis.ranking.diagnostics if analysis else {}, walk_forward_summary(selection)
+        )
         with st.container(horizontal=True):
             st.metric("Rank", f"{int(row['Rank'])} of {len(ranking_frame)}", border=True)
             st.metric("Expected excess", f"{float(row['Expected excess return']):+.2f}%", border=True)
