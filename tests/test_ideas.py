@@ -13,7 +13,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from ideas import describe_stock, market_mood, pick_ideas, stock_traits
+from ideas import describe_stock, market_mood, pick_ideas, risk_level, stock_traits
 
 PERIODS = 300
 
@@ -68,6 +68,15 @@ class IdeasTest(unittest.TestCase):
         self.assertIn("Strong uptrend over the past year", reasons)
         self.assertLessEqual(len(reasons), 3)
         self.assertIn("Weak trend over the past year", describe_stock(traits.loc["DOWN"], None))
+
+    def test_risk_tag_marks_the_jumpiest_and_steadiest_stocks(self) -> None:
+        prices = {
+            f"S{index}": _history(0.0, noise=0.005 * (index + 1), seed=index) for index in range(5)
+        }
+        traits = stock_traits(prices)
+        self.assertEqual("low", risk_level(traits.loc["S0"]))
+        self.assertEqual("", risk_level(traits.loc["S2"]))
+        self.assertEqual("high", risk_level(traits.loc["S4"]))
 
     def test_market_mood_reads_breadth_and_volatility(self) -> None:
         rising = {f"S{index}": _history(0.002, noise=0.004, seed=index) for index in range(6)}

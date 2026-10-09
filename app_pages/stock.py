@@ -4,19 +4,18 @@
 # file: app_pages/stock.py
 #############################
 
-"""Stock: one company's price, projection, model view, and news sentiment."""
+"""Stock: one company's key numbers, the tested model's view, price, and news."""
 
 from __future__ import annotations
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from chart_pipeline import build_ticker_forecast, record_displayed_forecast
 from global_markets import performance_metrics
 from market_data import get_news, get_price_history_batch
 from market_sources import WATCHLIST_KEY, company_name, source_for_ticker
-from model_evidence import assess_ranking_evidence
+from model_evidence import assess_walk_forward_evidence
 from runtime_config import RUN_IN_PROCESS_SENTIMENT
 from sentiment_store import load_sentiment_history
 from ui_components import (
@@ -26,7 +25,15 @@ from ui_components import (
     render_forecast_caption,
     render_forecast_status,
 )
-from ui_state import current_selection, market_analysis, walk_forward_summary
+from ui_state import HOLDING_PERIODS, current_selection, market_analysis, walk_forward_summary
+
+TRADING_DAYS_PER_YEAR = 252
+EVIDENCE_BADGES = {
+    "supported": ":green-badge[:material/verified: Tested edge]",
+    "tentative": ":orange-badge[:material/science: Early evidence, not proven]",
+    "none": ":gray-badge[No proven edge here]",
+    "untested": ":gray-badge[Not tested yet]",
+}
 
 selection = current_selection()
 analysis = market_analysis(selection, compute=False)
@@ -88,65 +95,56 @@ with st.container(horizontal=True):
         help="Annualized standard deviation of the last 20 daily returns.",
     )
 
-# --- Projection ----------------------------------------------------------------
-with st.container(border=True):
-    st.markdown(f"**{selection.horizon}-session projection**")
-    with st.spinner("Fitting the projection and its walk-forward backtest..."):
-        forecast = build_ticker_forecast(
-            ticker,
-            history,
-            ticker_source=universe_key,
-            realtime_mode=False,
-            interval="1d",
-            forecast_points=selection.horizon,
-        )
-    ranking_frame = analysis.ranking.ranking if analysis is not None else pd.DataFrame()
-    record_displayed_forecast(forecast, monitoring_market=universe_key, ranking=ranking_frame)
-    render_forecast_status(forecast)
-    st.plotly_chart(forecast_figure(forecast, price_axis_label=price_axis_label), key=f"projection_{ticker}")
-    render_forecast_caption(forecast, horizon=selection.horizon, price_prefix=price_prefix)
-    summary = forecast.backtest_summary()
-    if summary is not None:
-        with st.expander("Projection backtest"):
-            st.dataframe(
-                pd.DataFrame([summary]),
-                column_config=backtest_column_config(price_format),
-                hide_index=True,
-            )
-            st.caption(backtest_caption(selection.horizon))
-
 # --- Model view ----------------------------------------------------------------
+period_label = HOLDING_PERIODS.get(selection.horizon, f"{selection.horizon} sessions")
+ranking_frame = analysis.ranking.ranking if analysis is not None else pd.DataFrame()
+ranking_row = (
+    ranking_frame[ranking_frame["Ticker"] == ticker]
+    if not ranking_frame.empty and "Ticker" in ranking_frame.columns
+    else pd.DataFrame()
+)
 with st.container(border=True):
-    st.markdown("**Market model view**")
-    ranking_row = (
-        ranking_frame[ranking_frame["Ticker"] == ticker]
-        if not ranking_frame.empty and "Ticker" in ranking_frame.columns
-        else pd.DataFrame()
-    )
     if ranking_row.empty:
+        st.markdown(f"**What the model says, {period_label} view**")
         st.caption(
-            "Open Market ranking for this stock's universe to see where the pooled model "
-            "places it."
+            "The model ranks a whole market at a time. Open Today for this stock's market "
+            "to see where it stands."
         )
     else:
         row = ranking_row.iloc[0]
-        evidence = assess_ranking_evidence(
-            analysis.ranking.diagnostics if analysis else {}, walk_forward_summary(selection)
-        )
+        tested = walk_forward_summary(selection)
+        evidence = assess_walk_forward_evidence(tested) if tested else None
+        level = evidence.level if evidence is not None else "untested"
+        badge = EVIDENCE_BADGES.get(level, "")
+        st.markdown(f"**What the model says, {period_label} view** &nbsp; {badge}")
         with st.container(horizontal=True):
-            st.metric("Rank", f"{int(row['Rank'])} of {len(ranking_frame)}", border=True)
-            st.metric("Expected excess", f"{float(row['Expected excess return']):+.2f}%", border=True)
-            st.metric("Probability outperform", f"{float(row['Probability outperform']):.0f}%", border=True)
+            st.metric("Rank in this market", f"{int(row['Rank'])} of {len(ranking_frame)}", border=True)
             st.metric(
-                "80% band",
+                "Expected vs the market",
+                f"{float(row['Expected excess return']):+.1f}%",
+                border=True,
+                help="Predicted return minus the average stock in this market.",
+            )
+            st.metric(
+                "Likely range",
                 f"{float(row['Lower 80']):+.1f}% to {float(row['Upper 80']):+.1f}%",
                 border=True,
+                help="8 outcomes in 10 fall in this range, relative to the market.",
             )
-        st.caption(f"Evidence for this universe: {evidence.headline.lower()}.")
+        if level not in ("supported", "tentative"):
+            st.caption(
+                "In this market the model has not shown it can beat chance, so treat these "
+                "numbers as unproven."
+            )
 
-# --- Sentiment -----------------------------------------------------------------
+# --- Price ---------------------------------------------------------------------
+st.markdown("**Price, past year**")
+year = history.tail(TRADING_DAYS_PER_YEAR)[["Date", "Close"]]
+st.line_chart(year, x="Date", y="Close", y_label=price_axis_label, x_label="", height=280)
+
+# --- News ----------------------------------------------------------------------
 with st.container(border=True):
-    st.markdown("**News sentiment**")
+    st.markdown("**News**")
     articles = load_sentiment_history(ticker)
     if articles.empty:
         st.caption("No headlines have been collected for this stock yet.")
@@ -155,44 +153,54 @@ with st.container(border=True):
                 get_news(ticker, company)
             st.rerun()
     else:
-        daily = (
-            articles.assign(day=pd.to_datetime(articles["published_at"]).dt.normalize())
-            .groupby("day")
-            .agg(sentiment=("sentiment", "mean"), articles=("title", "size"))
-            .tail(60)
-        )
-        figure = go.Figure()
-        figure.add_trace(
-            go.Bar(x=daily.index, y=daily["articles"], name="Articles", yaxis="y2",
-                   marker_color="rgba(150, 150, 160, 0.35)")
-        )
-        figure.add_trace(
-            go.Scatter(x=daily.index, y=daily["sentiment"], name="Average sentiment",
-                       mode="lines+markers")
-        )
-        figure.update_layout(
-            template="plotly_white",
-            height=300,
-            margin={"l": 10, "r": 10, "t": 30, "b": 10},
-            yaxis={"title": "Sentiment (-1 to +1)", "range": [-1, 1]},
-            yaxis2={"title": "Articles", "overlaying": "y", "side": "right", "showgrid": False},
-            legend={"orientation": "h", "y": 1.12},
-        )
-        st.plotly_chart(figure, key=f"sentiment_{ticker}")
-        recent = articles.sort_values("published_at", ascending=False).head(15)
+        published = pd.to_datetime(articles["published_at"], utc=True)
+        recent_week = articles[published >= published.max() - pd.Timedelta(days=7)]
+        tone = float(recent_week["sentiment"].mean())
+        mood = "positive" if tone >= 0.2 else "negative" if tone <= -0.2 else "mixed"
+        st.caption(f"{len(recent_week)} headlines in the past week; overall tone is {mood}.")
         st.dataframe(
-            recent,
-            column_order=["published_at", "source", "title", "sentiment_label", "sentiment", "link"],
+            articles.sort_values("published_at", ascending=False).head(8),
+            column_order=["published_at", "title", "sentiment_label", "link"],
             column_config={
                 "published_at": st.column_config.DatetimeColumn("Published", format="MMM DD, HH:mm"),
-                "source": "Source",
                 "title": "Headline",
-                "sentiment_label": "Label",
-                "sentiment": st.column_config.NumberColumn("Score", format="%+.2f"),
+                "sentiment_label": "Tone",
                 "link": st.column_config.LinkColumn("Link", display_text="Open"),
             },
             hide_index=True,
         )
+
+# --- Advanced ------------------------------------------------------------------
+if st.toggle(
+    "Show the experimental single-stock price projection",
+    key="stock_projection",
+    help="A separate model that projects this stock's price on its own. Its backtest is often "
+    "no better than assuming no change, so it is hidden by default.",
+):
+    with st.container(border=True):
+        with st.spinner("Fitting the projection and its walk-forward backtest..."):
+            forecast = build_ticker_forecast(
+                ticker,
+                history,
+                ticker_source=universe_key,
+                realtime_mode=False,
+                interval="1d",
+                forecast_points=selection.horizon,
+            )
+        record_displayed_forecast(forecast, monitoring_market=universe_key, ranking=ranking_frame)
+        render_forecast_status(forecast)
+        st.plotly_chart(
+            forecast_figure(forecast, price_axis_label=price_axis_label), key=f"projection_{ticker}"
+        )
+        render_forecast_caption(forecast, horizon=selection.horizon, price_prefix=price_prefix)
+        summary = forecast.backtest_summary()
+        if summary is not None:
+            st.dataframe(
+                pd.DataFrame([summary]),
+                column_config=backtest_column_config(price_format),
+                hide_index=True,
+            )
+            st.caption(backtest_caption(selection.horizon))
 
 # --- Intraday ------------------------------------------------------------------
 if st.toggle("Show intraday prices (5-minute bars, last 5 sessions)", key="stock_intraday"):
@@ -200,12 +208,8 @@ if st.toggle("Show intraday prices (5-minute bars, last 5 sessions)", key="stock
     if intraday.empty:
         st.caption("No intraday data is available right now.")
     else:
-        figure = go.Figure(
-            go.Scatter(x=intraday["Date"], y=intraday["Close"], mode="lines", name="5-minute close")
+        st.line_chart(
+            intraday[["Date", "Close"]], x="Date", y="Close", y_label=price_axis_label,
+            x_label="", height=280,
         )
-        figure.update_layout(
-            template="plotly_white", height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
-            yaxis_title=price_axis_label,
-        )
-        st.plotly_chart(figure, key=f"intraday_{ticker}")
         st.caption("Yahoo Finance intraday bars can be delayed by up to 15-20 minutes.")

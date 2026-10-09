@@ -23,6 +23,11 @@ from ui_state import (
     walk_forward_summary,
 )
 
+RISK_BADGES = {
+    "high": ":red-badge[:material/bolt: Big price swings]",
+    "low": ":green-badge[:material/water: Steady price]",
+    "": "",
+}
 MOOD_STYLE = {
     "positive": (st.success, ":material/trending_up:"),
     "mixed": (st.info, ":material/trending_flat:"),
@@ -128,16 +133,15 @@ if not best:
 
 def render_idea(idea: Idea) -> None:
     with st.container(border=True):
-        st.markdown(f"**{idea.company}** &nbsp; :gray[{idea.ticker}]")
+        st.markdown(
+            f"**{idea.company}** &nbsp; :gray[{idea.ticker}] &nbsp; {RISK_BADGES[idea.risk]}"
+        )
         st.metric(
             f"Expected vs the market, {period}",
             f"{idea.expected_excess:+.1f}%",
             help="Predicted return minus the average stock in this market.",
         )
-        st.caption(
-            f"Likely range vs the market: {idea.low:+.1f}% to {idea.high:+.1f}% (8 times in 10). "
-            f"Chance to beat the market: {idea.probability:.0f}%."
-        )
+        st.markdown(f"Likely range: **{idea.low:+.1f}%** to **{idea.high:+.1f}%**")
         if idea.reasons:
             st.markdown("\n".join(f"- {reason}" for reason in idea.reasons))
         if st.button("See details", key=f"open_{idea.ticker}", icon=":material/arrow_forward:"):
@@ -158,8 +162,11 @@ if worst:
         "The model expects these to lag the market."
     )
 
+tested_years = float(tested.get("Test years", 0.0)) if tested else 0.0
 st.caption(
-    f"{evidence.caveat.splitlines()[0].replace('**', '')} These are model ideas, not advice: "
-    "spread your money across several ideas and keep each one small. "
+    f"The likely range covers 8 outcomes in 10. The model's picks beat chance over "
+    f"{tested_years:.0f} years of testing, "
+    + ("convincingly. " if evidence.level == "supported" else "but only slightly. ")
+    + "Spread your money across several ideas and keep each one small. "
     "The full ranking is under Advanced."
 )

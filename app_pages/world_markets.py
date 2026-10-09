@@ -4,7 +4,7 @@
 # file: app_pages/world_markets.py
 #############################
 
-"""Global markets: cross-asset dashboard and a summary of every stock universe."""
+"""Global markets: headline instruments, a simple list of stock markets, and details."""
 
 from __future__ import annotations
 
@@ -27,11 +27,14 @@ from ui_components import selectable_table
 from ui_state import current_selection
 
 current_selection()
-st.caption(
-    "World indices, volatility, rates, currencies, commodities, and crypto from daily "
-    "Yahoo Finance closes, then every tracked stock universe. Select a stock to open it."
-)
 ensure_overview_warmup()
+TODAY_PAGE = "app_pages/today.py"
+MARKET_TABLE_KEY = "market_list"
+
+# A market picked in the list opens Today for it. The choice is applied in a
+# callback, before the sidebar's market selector is drawn on the next run.
+if st.session_state.pop("open_today", False):
+    st.switch_page(TODAY_PAGE)
 
 # symbol: (label, value format, change is in percentage points)
 HEADLINES = {
@@ -119,13 +122,8 @@ def render_overview() -> None:
         st.info("Loading world markets...", icon=":material/hourglass:")
     else:
         render_headlines(instruments.frame)
-        render_asset_tabs(instruments.frame)
 
-    st.subheader("Stock universes")
-    st.caption(
-        "Breadth and median performance of every tracked universe. Advancing is the share "
-        "of stocks up on their latest session."
-    )
+    st.subheader("Stock markets")
     summaries = []
     snapshots = []
     for key, source in MARKET_SOURCE_REGISTRY.items():
@@ -133,30 +131,46 @@ def render_overview() -> None:
         if entry is None:
             continue
         snapshots.append(entry.frame)
-        summaries.append(
-            {
-                "Universe": source.label,
-                "Region": source.region,
-                "Data": "Live" if entry.live else "Saved",
-                **universe_summary(entry.frame),
-            }
-        )
+        summaries.append({"key": key, "Market": source.label, **universe_summary(entry.frame)})
     if not summaries:
-        st.info("Loading stock universes...", icon=":material/hourglass:")
+        st.info("Loading stock markets...", icon=":material/hourglass:")
         return
+    markets = pd.DataFrame(summaries)
     st.dataframe(
-        pd.DataFrame(summaries),
+        markets,
+        column_order=["Market", "Median 1D", "Median 1M", "Advancing", "Best today"],
         column_config={
-            "Advancing": st.column_config.ProgressColumn(
-                "Advancing", min_value=0, max_value=100, format="%.0f%%"
+            "Median 1D": st.column_config.NumberColumn(
+                "Today", format="%+.2f%%", help="The typical (median) stock's move today."
             ),
-            "Median 1D": st.column_config.NumberColumn("Median 1D", format="%+.2f%%"),
-            "Median 1M": st.column_config.NumberColumn("Median 1M", format="%+.2f%%"),
-            "Median YTD": st.column_config.NumberColumn("Median YTD", format="%+.2f%%"),
+            "Median 1M": st.column_config.NumberColumn(
+                "1 month", format="%+.2f%%", help="The typical (median) stock's move over a month."
+            ),
+            "Advancing": st.column_config.ProgressColumn(
+                "Stocks rising today", min_value=0, max_value=100, format="%.0f%%"
+            ),
         },
         hide_index=True,
+        on_select=lambda: _open_market(list(markets["key"])),
+        selection_mode="single-row",
+        key=MARKET_TABLE_KEY,
     )
+    st.caption("Select a market to see its ideas on Today.")
 
+    with st.expander("More detail: every instrument and today's biggest movers"):
+        if instruments is not None:
+            render_asset_tabs(instruments.frame)
+        render_movers(snapshots)
+
+
+def _open_market(keys: list[str]) -> None:
+    rows = st.session_state[MARKET_TABLE_KEY].selection.rows
+    if rows:
+        st.session_state["universe"] = keys[rows[0]]
+        st.session_state["open_today"] = True
+
+
+def render_movers(snapshots: list[pd.DataFrame]) -> None:
     gainers, losers = global_movers(snapshots)
     mover_columns = ["Ticker", "Company", "Universe", "1D", "1M", "Trend"]
     mover_config = {

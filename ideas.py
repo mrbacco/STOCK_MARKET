@@ -43,6 +43,8 @@ class Idea:
     # Chance of beating the market, in %.
     probability: float
     reasons: list[str] = field(default_factory=list)
+    # "high", "low", or "" for typical price swings within this market.
+    risk: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,13 +125,19 @@ def describe_stock(traits: pd.Series, sentiment: float | None) -> list[str]:
             add(0.75, "Recent news has been positive")
         elif sentiment <= -0.2:
             add(0.75, "Recent news has been negative")
-    volatility = trait("volatility_pct")
-    if volatility <= 0.3:
-        add(0.6, "Steadier price than most stocks here")
-    elif volatility >= 0.8:
-        add(0.6, "Swings more than most stocks here, so keep the position small")
     reasons.sort(key=lambda item: item[0], reverse=True)
     return [text for _strength, text in reasons[:MAX_REASONS]]
+
+
+def risk_level(traits: pd.Series) -> str:
+    """'high' for the jumpiest fifth of the market, 'low' for the steadiest third."""
+    value = traits.get("volatility_pct")
+    volatility = float(value) if value is not None else float("nan")
+    if volatility >= 0.8:
+        return "high"
+    if volatility <= 0.3:
+        return "low"
+    return ""
 
 
 def _ideas(
@@ -153,6 +161,7 @@ def _ideas(
                 reasons=describe_stock(
                     stock, float(sentiment) if isinstance(sentiment, (int, float)) else None
                 ),
+                risk=risk_level(stock),
             )
         )
     return ideas

@@ -34,7 +34,7 @@ from cache_control import cached_result
 from market_data import get_price_history_batch
 
 SPARKLINE_BARS = 63
-RETURN_WINDOWS = {"1D": 1, "1W": 5, "1M": 21, "3M": 63, "1Y": 252}
+RETURN_WINDOWS = {"1D": 1, "1W": 5, "1M": 21, "3M": 63}
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,7 @@ def performance_metrics(history: pd.DataFrame, *, level_changes: bool = False) -
         .sort_values("Date")
     )
     metrics: dict[str, Any] = {"Last": np.nan, "Last session": None, "Trend": []}
-    for label in (*RETURN_WINDOWS, "YTD"):
+    for label in (*RETURN_WINDOWS, "1Y", "YTD"):
         metrics[label] = np.nan
     metrics["Volatility 20D"] = np.nan
     if len(frame) < 2:
@@ -123,6 +123,16 @@ def performance_metrics(history: pd.DataFrame, *, level_changes: bool = False) -
     for label, bars in RETURN_WINDOWS.items():
         if len(close) > bars:
             metrics[label] = change(float(close[-1 - bars]))
+    # One year is measured by calendar date: exchanges trade 245-255 sessions a
+    # year, so a fixed bar count fails on a one-year download.
+    # A download that starts a few days after the anniversary still counts.
+    year_ago = pd.Timestamp(frame["Date"].iloc[-1]) - pd.DateOffset(years=1)
+    before = frame.loc[frame["Date"] <= year_ago, "Close"]
+    near = frame.loc[frame["Date"] <= year_ago + pd.Timedelta(days=4), "Close"]
+    if not before.empty:
+        metrics["1Y"] = change(float(before.iloc[-1]))
+    elif not near.empty:
+        metrics["1Y"] = change(float(near.iloc[0]))
     current_year = pd.Timestamp(frame["Date"].iloc[-1]).year
     prior_year = frame.loc[frame["Date"].dt.year < current_year, "Close"]
     if not prior_year.empty:
@@ -138,7 +148,8 @@ def performance_metrics(history: pd.DataFrame, *, level_changes: bool = False) -
 def global_market_snapshot() -> pd.DataFrame:
     """Return one row of performance metrics per global instrument."""
     symbols = [instrument.symbol for instrument in GLOBAL_INSTRUMENTS]
-    snapshot = _instrument_frame(get_price_history_batch(symbols, period="1y", interval="1d"))
+    # Two years, so the one-year change always has a starting close.
+    snapshot = _instrument_frame(get_price_history_batch(symbols, period="2y", interval="1d"))
     bac_log_kv(
         "global_markets.snapshot",
         instruments=len(snapshot),

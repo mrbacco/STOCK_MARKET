@@ -141,7 +141,7 @@ class AppPagesTest(unittest.TestCase):
         self.assertEqual([], [error.value for error in app.exception])
         labels = [metric.label for metric in app.metric]
         self.assertIn("S&P 500", labels)
-        self.assertTrue(any(header.value == "Stock universes" for header in app.subheader))
+        self.assertTrue(any(header.value == "Stock markets" for header in app.subheader))
 
     def test_market_ranking_shows_evidence_before_the_ranking(self) -> None:
         app = self._open(self._app(), "app_pages/market_ranking.py")
@@ -151,12 +151,18 @@ class AppPagesTest(unittest.TestCase):
         self.assertIn("Rank IC", [metric.label for metric in app.metric])
         self.assertGreaterEqual(len(app.dataframe), 1)
 
-    def test_stock_page_renders_a_projection(self) -> None:
+    def test_stock_page_shows_the_model_view_and_an_opt_in_projection(self) -> None:
         app = self._app()
         self._open(app, "app_pages/market_ranking.py")
         self._open(app, "app_pages/stock.py")
+        labels = [metric.label for metric in app.metric]
+        self.assertIn("Last close", labels)
+        self.assertIn("Expected vs the market", labels)
+        # The single-stock projection is computed only when asked for.
+        self.assertEqual(0, len(app.get("plotly_chart")))
+        app.toggle(key="stock_projection").set_value(True).run()
+        self.assertEqual([], [error.value for error in app.exception])
         self.assertGreaterEqual(len(app.get("plotly_chart")), 1)
-        self.assertIn("Last close", [metric.label for metric in app.metric])
 
     def test_portfolio_news_and_model_health_render(self) -> None:
         app = self._app()
